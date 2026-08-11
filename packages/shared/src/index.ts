@@ -86,6 +86,7 @@ export interface RoomSnapshot {
     deadlineAt: number | null;
   };
   roundResult: RoundResult | null;
+  roundResultEndsAt: number | null;
   finalResult: FinalResult | null;
   permissions: {
     canStart: boolean;

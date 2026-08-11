@@ -51,6 +51,7 @@ interface GameState {
   runoffTallies: VoteTally[] | null;
   deadlineAt: number | null;
   currentRoundResult: RoundResult | null;
+  roundResultEndsAt: number | null;
   roundResults: RoundResult[];
   winner: Winner | null;
 }
@@ -291,6 +292,7 @@ export class RoomService {
       runoffTallies: null,
       deadlineAt: null,
       currentRoundResult: null,
+      roundResultEndsAt: null,
       roundResults: [],
       winner: null,
     };
@@ -451,6 +453,7 @@ export class RoomService {
     if (!room.game) return;
     room.game.roundResults.push(result);
     room.game.currentRoundResult = result;
+    room.game.roundResultEndsAt = this.now() + GAME_CONFIG.roundResultDurationMs;
     room.phase = "ROUND_RESULT";
     this.clearRoomTimer(this.resultTimers, room.code);
     const timer = this.setTimer(() => this.advanceRound(room.code), GAME_CONFIG.roundResultDurationMs);
@@ -464,6 +467,7 @@ export class RoomService {
     if (!room?.game || room.phase !== "ROUND_RESULT") return;
     room.game.round += 1;
     room.game.currentRoundResult = null;
+    room.game.roundResultEndsAt = null;
     room.game.speakingOrder = this.generateSpeakingOrder(this.alivePlayers(room));
     room.phase = "SPEAKING";
     this.touchAndPublish(room);
@@ -476,6 +480,7 @@ export class RoomService {
     room.game.winner = winner;
     room.game.votingKind = null;
     room.game.deadlineAt = null;
+    room.game.roundResultEndsAt = null;
     room.phase = "ENDED";
     this.touchAndPublish(room);
   }
@@ -542,6 +547,7 @@ export class RoomService {
             }
           : null,
       roundResult: game?.currentRoundResult ?? null,
+      roundResultEndsAt: room.phase === "ROUND_RESULT" ? game?.roundResultEndsAt ?? null : null,
       finalResult: room.phase === "ENDED" ? this.finalResult(room) : null,
       permissions: {
         canStart: isHost && room.phase === "WAITING" && this.activeParticipants(room).length === this.requiredPlayerCount(room),

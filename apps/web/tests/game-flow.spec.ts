@@ -90,10 +90,101 @@ test("nickname is shared by separate create and join paths", async ({ page }) =>
   await expect(page.locator(".nickname-summary")).toContainText("小 明");
   await expect(page.getByLabel("6 位房间号")).toBeFocused();
   await page.getByRole("button", { name: "修改" }).click();
+  await expect(page.getByLabel("昵称")).toHaveValue("小 明");
+  await page.getByRole("button", { name: "返回" }).click();
 
   await page.locator(".entry-choice.create").click();
   await expect(page.getByRole("heading", { name: "创建房间" })).toBeVisible();
   await expect(page.locator(".nickname-summary")).toContainText("小 明");
+});
+
+test("an invitation link opens the join path and shared text can fill the room code", async ({ page }) => {
+  await page.goto("/?room=455811");
+  await expect(page.getByRole("heading", { name: "加入房间" })).toBeVisible();
+  await expect(page.getByLabel("6 位房间号")).toHaveValue("455811");
+  await expect(page.getByLabel("昵称")).toBeFocused();
+  await expect(page).toHaveURL(/\/$/);
+
+  await page.getByLabel("昵称").fill("邀请玩家");
+  await page.getByLabel("6 位房间号").fill("谁是卧底房间号：277360");
+  await expect(page.getByLabel("6 位房间号")).toHaveValue("277360");
+});
+
+test("online setup uses fixed participant presets and accessible controls", async ({ page }) => {
+  await openOnline(page, "配置房主");
+  await page.locator(".entry-choice.create").click();
+  await expect(page.getByText("参赛 6 人，还需邀请 5 名玩家")).toBeVisible();
+  await expect(page.getByRole("switch", { name: "房主参与游戏" })).toBeVisible();
+
+  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "参赛人数减一" }).click();
+  await expect(page.locator(".participant-summary strong")).toHaveText("3");
+  await page.getByRole("button", { name: "调整身份配置" }).click();
+  await expect(page.getByText("平民数量")).toBeVisible();
+  await expect(page.locator(".config-disclosure")).toContainText("2 平民 · 1 卧底 · 0 白板");
+  await page.getByRole("switch", { name: "房主参与游戏" }).click();
+  await expect(page.getByText("参赛 3 人，现场共 4 人，还需邀请 3 名玩家")).toBeVisible();
+
+  const hitbox = await page.getByRole("button", { name: "参赛人数加一" }).boundingBox();
+  expect(hitbox?.width).toBeGreaterThanOrEqual(44);
+  expect(hitbox?.height).toBeGreaterThanOrEqual(44);
+});
+
+test("room invitation falls back to copying only the six-digit code", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "share", { configurable: true, value: undefined });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (value: string) => localStorage.setItem("copied-room-code", value) },
+    });
+  });
+  await openOnline(page, "邀请房主");
+  await page.locator(".entry-choice.create").click();
+  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "参赛人数减一" }).click();
+  await page.getByRole("button", { name: "创建房间", exact: true }).click();
+  const roomCode = (await page.locator(".room-code-card strong").textContent())!.trim();
+
+  await page.getByRole("button", { name: "邀请朋友加入房间" }).click();
+  await expect(page.getByText("房间号已复制")).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("copied-room-code"))).toBe(roomCode);
+});
+
+test("room invitation prefers system share and treats cancellation as silent", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "share", {
+      configurable: true,
+      value: async (data: ShareData) => localStorage.setItem("shared-room", JSON.stringify(data)),
+    });
+  });
+  await openOnline(page, "分享房主");
+  await page.locator(".entry-choice.create").click();
+  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "参赛人数减一" }).click();
+  await page.getByRole("button", { name: "创建房间", exact: true }).click();
+  const roomCode = (await page.locator(".room-code-card strong").textContent())!.trim();
+
+  await page.getByRole("button", { name: "邀请朋友加入房间" }).click();
+  const shared = JSON.parse((await page.evaluate(() => localStorage.getItem("shared-room")))!) as ShareData;
+  expect(shared.url).toBe(`http://127.0.0.1:4173/?room=${roomCode}`);
+  expect(shared.text).toContain(roomCode);
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "share", {
+      configurable: true,
+      value: async () => {
+        throw new DOMException("用户取消", "AbortError");
+      },
+    });
+  });
+  await page.getByRole("button", { name: "邀请朋友加入房间" }).click();
+  await expect(page.locator(".toast")).toHaveCount(0);
+});
+
+test("desktop mode home is content-height and vertically centered", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/");
+  const home = await page.locator(".mode-home-page").boundingBox();
+  expect(home).not.toBeNull();
+  expect(home!.height).toBeLessThan(820);
+  expect(Math.abs(home!.y - (900 - home!.height) / 2)).toBeLessThan(24);
 });
 
 test("three players can complete a private game and return to the same lobby", async ({ browser }) => {
@@ -108,9 +199,7 @@ test("three players can complete a private game and return to the same lobby", a
 
   await openOnline(host, "房主");
   await host.locator(".entry-choice.create").click();
-  await host.getByRole("button", { name: "平民数量减一" }).click();
-  await host.getByRole("button", { name: "平民数量减一" }).click();
-  await host.getByRole("button", { name: "白板数量减一" }).click();
+  for (let index = 0; index < 3; index += 1) await host.getByRole("button", { name: "参赛人数减一" }).click();
   await host.getByRole("button", { name: "创建房间", exact: true }).click();
   const roomCode = (await host.locator(".room-code-card strong").textContent())?.trim();
   expect(roomCode).toMatch(/^\d{6}$/);
@@ -158,8 +247,8 @@ test("a tied player still sees self and the anonymous runoff tallies", async ({ 
 
   await openOnline(host, "房主");
   await host.locator(".entry-choice.create").click();
-  await host.getByRole("button", { name: "平民数量减一" }).click();
-  await host.getByRole("button", { name: "白板数量减一" }).click();
+  await host.getByRole("button", { name: "参赛人数减一" }).click();
+  await host.getByRole("button", { name: "参赛人数减一" }).click();
   await host.getByRole("button", { name: "创建房间", exact: true }).click();
   const roomCode = (await host.locator(".room-code-card strong").textContent())!.trim();
 
@@ -182,11 +271,46 @@ test("a tied player still sees self and the anonymous runoff tallies", async ({ 
   }
 
   await expect(host.getByRole("heading", { name: "平票玩家再次发言" })).toBeVisible();
+  await expect(host.getByText("出现平票，请重新投票")).toBeVisible();
   await expect(host.locator(".vote-player")).toHaveCount(2);
   await expect(host.locator(".vote-player.self-candidate")).toContainText("房主");
   await expect(host.locator(".vote-player.self-candidate")).toContainText("我");
   await expect(host.locator(".vote-player.self-candidate")).toBeDisabled();
   await expect(host.locator(".vote-player small")).toHaveText(["上轮 2 票", "上轮 2 票"]);
+
+  await Promise.all(contexts.map((context) => context.close()));
+});
+
+test("twelve online players reach a usable voting layout", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const contexts: BrowserContext[] = [];
+  const pages: Page[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    const context = await browser.newContext();
+    contexts.push(context);
+    pages.push(await context.newPage());
+  }
+  const host = pages[0]!;
+  await openOnline(host, "十二人房主");
+  await host.locator(".entry-choice.create").click();
+  for (let index = 0; index < 6; index += 1) await host.getByRole("button", { name: "参赛人数加一" }).click();
+  await host.getByRole("button", { name: "创建房间", exact: true }).click();
+  const roomCode = (await host.locator(".room-code-card strong").textContent())!.trim();
+
+  await Promise.all(
+    pages.slice(1).map((page, index) => joinRoom(page, index === 10 ? "很长很长的玩家十一" : `十二人玩家${index + 2}`, roomCode)),
+  );
+  await expect(host.getByText("12 / 12")).toBeVisible();
+  await host.getByRole("button", { name: "开始游戏" }).click();
+  await expect(host.locator(".speaking-list .speaker-row")).toHaveCount(12);
+  await expect(host.locator(".speaking-list")).not.toContainText("等待中");
+  await expect(host.locator(".speaking-list")).not.toContainText("首先发言");
+
+  await host.getByRole("button", { name: /结束发言/ }).click();
+  await expect(host.locator(".vote-player")).toHaveCount(12);
+  await host.getByRole("button", { name: /选择很长很长的玩家十一/ }).click();
+  await expect(host.getByText("已选择：")).toContainText("很长很长的玩家十一");
+  await expect(host.locator(".vote-submit-bar")).toBeVisible();
 
   await Promise.all(contexts.map((context) => context.close()));
 });
@@ -202,6 +326,7 @@ test("six-player game preserves identity on refresh and lets an eliminated host 
   const host = pages[0]!;
   await openOnline(host, "房主");
   await host.locator(".entry-choice.create").click();
+  await host.getByRole("button", { name: "调整身份配置" }).click();
   await host.getByRole("button", { name: "平民数量减一" }).click();
   await host.getByRole("button", { name: "卧底数量加一" }).click();
   await host.getByRole("button", { name: "创建房间", exact: true }).click();
@@ -243,6 +368,8 @@ test("six-player game preserves identity on refresh and lets an eliminated host 
     await page.getByRole("button", { name: "确认匿名投票" }).click();
   }
 
+  await expect(host.locator(".round-progress")).toBeVisible();
+  await expect(host.getByText(/下一轮将在 [0-5] 秒后开始/)).toBeVisible();
   await expect(host.getByRole("button", { name: /结束发言/ })).toBeVisible({ timeout: 10_000 });
   await expect(host.locator(".speaking-list")).not.toContainText("房主");
   await host.getByRole("button", { name: "房间操作" }).click();
@@ -262,10 +389,8 @@ test("a non-playing host can run a three-player game without receiving a role or
   const host = pages[0]!;
   await openOnline(host, "主持人");
   await host.locator(".entry-choice.create").click();
-  await host.getByRole("button", { name: "平民数量减一" }).click();
-  await host.getByRole("button", { name: "平民数量减一" }).click();
-  await host.getByRole("button", { name: "白板数量减一" }).click();
-  await host.getByRole("switch").click();
+  for (let index = 0; index < 3; index += 1) await host.getByRole("button", { name: "参赛人数减一" }).click();
+  await host.getByRole("switch", { name: "房主参与游戏" }).click();
   await host.getByRole("button", { name: "创建房间", exact: true }).click();
   const roomCode = (await host.locator(".room-code-card strong").textContent())!.trim();
 

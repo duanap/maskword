@@ -97,9 +97,11 @@ describe("RoomService", () => {
 
     expect(snapshot(service, 1).phase).toBe("ROUND_RESULT");
     expect(snapshot(service, 1).roundResult).toMatchObject({ eliminatedPlayerId: null, reason: "TIE" });
+    expect(snapshot(service, 1).roundResultEndsAt).toBe(Date.now() + GAME_CONFIG.roundResultDurationMs);
     vi.advanceTimersByTime(GAME_CONFIG.roundResultDurationMs);
     expect(snapshot(service, 1).phase).toBe("SPEAKING");
     expect(snapshot(service, 1).round).toBe(2);
+    expect(snapshot(service, 1).roundResultEndsAt).toBeNull();
   });
 
   it("settles a normal vote at the deadline and treats missing voters as abstentions", () => {

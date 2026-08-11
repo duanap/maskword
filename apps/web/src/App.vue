@@ -4,8 +4,8 @@ import { io, type Socket } from "socket.io-client";
 import {
   PhArrowLeft as ArrowLeft,
   PhArrowRight as ArrowRight,
+  PhCaretDown as CaretDown,
   PhCheckCircle as CheckCircle,
-  PhClipboard as Clipboard,
   PhCrown as Crown,
   PhDoorOpen as DoorOpen,
   PhEye as Eye,
@@ -15,6 +15,7 @@ import {
   PhMaskHappy as MaskHappy,
   PhPlay as Play,
   PhSignOut as SignOut,
+  PhShareNetwork as ShareNetwork,
   PhSparkle as Sparkle,
   PhSpinnerGap as SpinnerGap,
   PhUser as User,
@@ -23,6 +24,7 @@ import {
   PhWifiHigh as WifiHigh,
   PhWifiSlash as WifiSlash,
 } from "@phosphor-icons/vue";
+import { DEFAULT_ROLE_CONFIGS, roleConfigError } from "@maskword/shared";
 import type {
   Ack,
   ClientToServerEvents,
@@ -32,20 +34,31 @@ import type {
   ServerToClientEvents,
   SessionCredentials,
 } from "@maskword/shared";
+import { buildRoomInviteUrl, extractRoomCode, normalizeRoomCodeInput } from "./online-utils";
 
 type LandingScreen = "modes" | "online" | "create" | "join" | "offline";
 type ConfirmAction = "leave" | "dissolve" | "finish-runoff" | null;
 
 const SESSION_KEY = "maskword-session-v1";
+const ROUND_RESULT_DURATION_MS = 5_000;
+const savedSession = localStorage.getItem(SESSION_KEY);
+const initialInviteRoomCode = savedSession
+  ? null
+  : extractRoomCode(new URL(window.location.href).searchParams.get("room"));
 const OfflineGame = defineAsyncComponent(() => import("./offline/OfflineGame.vue"));
 const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io({ autoConnect: false });
 const screen = ref<LandingScreen>(
-  localStorage.getItem("maskword-offline-v1") && !localStorage.getItem(SESSION_KEY) ? "offline" : "modes",
+  initialInviteRoomCode
+    ? "join"
+    : localStorage.getItem("maskword-offline-v1") && !savedSession
+      ? "offline"
+      : "modes",
 );
 const snapshot = ref<RoomSnapshot | null>(null);
 const nickname = ref(localStorage.getItem("maskword-nickname") ?? "");
-const roomCode = ref("");
+const roomCode = ref(initialInviteRoomCode ?? "");
 const roomCodeInput = ref<HTMLInputElement | null>(null);
+const nicknameInput = ref<HTMLInputElement | null>(null);
 const connectionState = ref<"connecting" | "online" | "offline">("offline");
 const busy = ref(false);
 const roleVisible = ref(false);
@@ -55,15 +68,16 @@ const toast = ref<{ message: string; tone: "info" | "success" | "error" } | null
 const modal = ref<{ title: string; body: string; type: "info" | "warning" } | null>(null);
 const confirmAction = ref<ConfirmAction>(null);
 const roomManagementOpen = ref(false);
+const advancedConfigOpen = ref(false);
+const joinNicknameEditing = ref(!nickname.value.trim());
+const participantCount = ref(6);
 const roleTimer = ref<ReturnType<typeof setTimeout> | null>(null);
 const toastTimer = ref<ReturnType<typeof setTimeout> | null>(null);
 const pwaUpdateReady = ref(false);
 const ticker = setInterval(() => (now.value = Date.now()), 1_000);
 
 const roomConfig = ref<RoomConfig>({
-  civilianCount: 4,
-  undercoverCount: 1,
-  blankCount: 1,
+  ...DEFAULT_ROLE_CONFIGS[6]!,
   hostParticipates: true,
 });
 
@@ -78,6 +92,15 @@ const voteSeconds = computed(() => {
   const deadline = snapshot.value?.voting?.deadlineAt;
   return deadline ? Math.max(0, Math.ceil((deadline - now.value) / 1_000)) : null;
 });
+const roundResultSeconds = computed(() => {
+  const deadline = snapshot.value?.roundResultEndsAt;
+  return deadline ? Math.max(0, Math.ceil((deadline - now.value) / 1_000)) : 0;
+});
+const roundResultProgress = computed(() => {
+  const deadline = snapshot.value?.roundResultEndsAt;
+  if (!deadline) return 0;
+  return Math.max(0, Math.min(100, ((deadline - now.value) / ROUND_RESULT_DURATION_MS) * 100));
+});
 const canSubmitVote = computed(
   () => snapshot.value?.voting?.canVote && selectedVoteTarget.value !== undefined && !busy.value,
 );
@@ -86,21 +109,26 @@ const nicknameValid = computed(() => {
   const length = [...normalizedNickname.value].length;
   return length >= 1 && length <= 12;
 });
-const roomCodeValid = computed(() => roomCode.value.replace(/\D/g, "").length === 6);
+const roomCodeValid = computed(() => /^\d{6}$/.test(roomCode.value));
 const runoffTallyById = computed(
   () => new Map(snapshot.value?.voting?.runoffTallies?.map((item) => [item.playerId, item.votes]) ?? []),
 );
-const configValid = computed(() => {
-  const config = roomConfig.value;
-  return (
-    totalConfigured.value >= 3 &&
-    totalConfigured.value <= 12 &&
-    config.civilianCount >= 1 &&
-    config.undercoverCount >= 1 &&
-    config.blankCount >= 0 &&
-    config.blankCount <= 2 &&
-    config.undercoverCount < config.civilianCount + config.blankCount
-  );
+const configError = computed(() => {
+  const difference = participantCount.value - totalConfigured.value;
+  if (difference > 0) return `当前已分配 ${totalConfigured.value} 人，还需增加 ${difference} 人`;
+  if (difference < 0) return `当前已分配 ${totalConfigured.value} 人，需要减少 ${Math.abs(difference)} 人`;
+  return roleConfigError(roomConfig.value);
+});
+const configValid = computed(() => configError.value === null);
+const attendanceSummary = computed(() =>
+  roomConfig.value.hostParticipates
+    ? `参赛 ${participantCount.value} 人，还需邀请 ${participantCount.value - 1} 名玩家`
+    : `参赛 ${participantCount.value} 人，现场共 ${participantCount.value + 1} 人，还需邀请 ${participantCount.value} 名玩家`,
+);
+const selectedVoteLabel = computed(() => {
+  if (selectedVoteTarget.value === undefined) return "尚未选择";
+  if (selectedVoteTarget.value === null) return "弃权";
+  return playerName(selectedVoteTarget.value);
 });
 const canShowPwaUpdate = computed(
   () => pwaUpdateReady.value && screen.value === "modes" && !snapshot.value && !localStorage.getItem("maskword-offline-v1"),
@@ -127,6 +155,12 @@ function showToast(message: string, tone: "info" | "success" | "error" = "info")
   toast.value = { message, tone };
   if (toastTimer.value) clearTimeout(toastTimer.value);
   toastTimer.value = setTimeout(() => (toast.value = null), 3_200);
+}
+
+function clearToast() {
+  toast.value = null;
+  if (toastTimer.value) clearTimeout(toastTimer.value);
+  toastTimer.value = null;
 }
 
 function getSession(): SessionCredentials | null {
@@ -187,6 +221,7 @@ async function openRoomPath(nextScreen: "create" | "join") {
   ensureSocketConnected();
   screen.value = nextScreen;
   if (nextScreen === "join") {
+    joinNicknameEditing.value = false;
     await nextTick();
     roomCodeInput.value?.focus();
   }
@@ -208,8 +243,8 @@ function createRoom() {
 
 function joinRoom() {
   if (!ensureNickname()) return;
-  const code = roomCode.value.replace(/\D/g, "").slice(0, 6);
-  if (code.length !== 6) {
+  const code = extractRoomCode(roomCode.value);
+  if (!code) {
     showToast("请输入 6 位房间号", "error");
     return;
   }
@@ -245,11 +280,12 @@ function simpleAction(
 
 function submitVote() {
   if (!canSubmitVote.value) return;
+  const submittedPhase = snapshot.value?.phase;
   busy.value = true;
   socket.emit("vote:submit", selectedVoteTarget.value ?? null, (result) => {
     handleAck(result, () => {
       selectedVoteTarget.value = undefined;
-      showToast("投票已匿名提交", "success");
+      if (snapshot.value?.phase === submittedPhase) showToast("投票已匿名提交", "success");
     });
   });
 }
@@ -259,14 +295,23 @@ function transferHost(targetId: string) {
   socket.emit("room:transferHost", targetId, (result) => handleAck(result, () => showToast("房主已转移", "success")));
 }
 
-async function copyRoom() {
+async function inviteRoom() {
   if (!snapshot.value) return;
-  const shareText = `谁是卧底房间号：${snapshot.value.roomCode}`;
+  const code = snapshot.value.roomCode;
+  const url = buildRoomInviteUrl(window.location.origin, code);
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "谁是卧底", text: `加入我的谁是卧底房间 ${code}`, url });
+      return;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+    }
+  }
   try {
-    await navigator.clipboard.writeText(shareText);
+    await navigator.clipboard.writeText(code);
     showToast("房间号已复制", "success");
   } catch {
-    showToast(`房间号：${snapshot.value.roomCode}`);
+    showToast(`房间号：${code}`);
   }
 }
 
@@ -292,8 +337,37 @@ function applyPwaUpdate() {
 }
 
 function adjustConfig(key: "civilianCount" | "undercoverCount" | "blankCount", delta: number) {
-  const limits: readonly [number, number] = key === "blankCount" ? [0, 2] : key === "undercoverCount" ? [1, 5] : [1, 10];
+  const limits: readonly [number, number] = key === "blankCount" ? [0, 2] : [1, participantCount.value - 1];
   roomConfig.value[key] = Math.min(limits[1], Math.max(limits[0], roomConfig.value[key] + delta));
+}
+
+function adjustParticipantCount(delta: number) {
+  participantCount.value = Math.min(12, Math.max(3, participantCount.value + delta));
+  const preset = DEFAULT_ROLE_CONFIGS[participantCount.value];
+  if (!preset) return;
+  roomConfig.value = { ...preset, hostParticipates: roomConfig.value.hostParticipates };
+}
+
+function handleRoomCodeInput(event: Event) {
+  roomCode.value = normalizeRoomCodeInput((event.target as HTMLInputElement).value);
+}
+
+function handleRoomCodePaste(event: ClipboardEvent) {
+  event.preventDefault();
+  roomCode.value = normalizeRoomCodeInput(event.clipboardData?.getData("text") ?? "");
+}
+
+async function editJoinNickname() {
+  joinNicknameEditing.value = true;
+  await nextTick();
+  nicknameInput.value?.focus();
+}
+
+function consumeInviteParameter() {
+  if (!initialInviteRoomCode) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("room");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function goBack() {
@@ -329,6 +403,11 @@ socket.on("disconnect", () => {
   hideRole();
 });
 socket.on("room:snapshot", (nextSnapshot) => {
+  const phaseChanged = snapshot.value !== null && snapshot.value.phase !== nextSnapshot.phase;
+  if (phaseChanged) {
+    clearToast();
+    selectedVoteTarget.value = undefined;
+  }
   snapshot.value = nextSnapshot;
   if (nextSnapshot.phase !== "VOTING" && nextSnapshot.phase !== "RUNOFF") selectedVoteTarget.value = undefined;
 });
@@ -353,8 +432,13 @@ onMounted(() => {
   window.addEventListener("blur", hideRole);
   window.addEventListener("pageshow", hideRole);
   window.addEventListener("maskword:pwa-update", handlePwaUpdate);
-  if (getSession()) ensureSocketConnected();
-  void nextTick();
+  consumeInviteParameter();
+  if (getSession() || screen.value === "join") ensureSocketConnected();
+  void nextTick(() => {
+    if (screen.value !== "join") return;
+    if (nicknameValid.value) roomCodeInput.value?.focus();
+    else nicknameInput.value?.focus();
+  });
 });
 
 onBeforeUnmount(() => {
@@ -381,7 +465,7 @@ onBeforeUnmount(() => {
         </section>
       </template>
     </Suspense>
-    <section v-else-if="!snapshot" class="phone-page landing-page">
+    <section v-else-if="!snapshot" class="phone-page landing-page" :class="{ 'mode-home-page': screen === 'modes' }">
       <header v-if="screen !== 'modes'" class="topbar">
         <button class="icon-button" aria-label="返回" @click="goBack"><ArrowLeft :size="22" /></button>
         <h1>{{ screen === 'create' ? '创建房间' : screen === 'join' ? '加入房间' : '线上联机' }}</h1>
@@ -445,14 +529,23 @@ onBeforeUnmount(() => {
         <div class="nickname-summary">
           <span class="avatar-small"><User :size="18" weight="fill" /></span>
           <span><small>使用昵称</small><strong>{{ nickname }}</strong></span>
-          <button class="text-button" @click="screen = 'online'">修改</button>
+          <button class="text-button" aria-label="修改创建房间使用的昵称" @click="screen = 'online'">修改</button>
         </div>
-        <div class="config-summary">
+        <div class="config-summary participant-summary">
           <span>本局参赛人数</span>
-          <strong>{{ totalConfigured }}</strong>
+          <strong>{{ participantCount }}</strong>
           <small>支持 3–12 人</small>
+          <div class="participant-stepper" aria-label="调整参赛人数">
+            <button aria-label="参赛人数减一" :disabled="participantCount <= 3" @click="adjustParticipantCount(-1)">−</button>
+            <button aria-label="参赛人数加一" :disabled="participantCount >= 12" @click="adjustParticipantCount(1)">＋</button>
+          </div>
         </div>
-        <div class="config-card">
+        <p class="attendance-summary">{{ attendanceSummary }}</p>
+        <button class="config-disclosure" :aria-expanded="advancedConfigOpen" @click="advancedConfigOpen = !advancedConfigOpen">
+          <span><strong>调整身份配置</strong><small>当前：{{ roomConfig.civilianCount }} 平民 · {{ roomConfig.undercoverCount }} 卧底 · {{ roomConfig.blankCount }} 白板</small></span>
+          <CaretDown :size="18" :class="{ rotated: advancedConfigOpen }" />
+        </button>
+        <div v-if="advancedConfigOpen" class="config-card">
           <div v-for="item in [
             { key: 'civilianCount', label: '平民数量', hint: '至少 1 人' },
             { key: 'undercoverCount', label: '卧底数量', hint: '至少 1 人' },
@@ -465,12 +558,14 @@ onBeforeUnmount(() => {
               <button :aria-label="`${item.label}加一`" @click="adjustConfig(item.key as 'civilianCount' | 'undercoverCount' | 'blankCount', 1)">＋</button>
             </div>
           </div>
+        </div>
+        <div class="config-card">
           <div class="host-toggle">
             <div><strong>房主参与游戏</strong><small>关闭后只负责主持</small></div>
-            <button class="switch" :class="{ active: roomConfig.hostParticipates }" role="switch" :aria-checked="roomConfig.hostParticipates" @click="roomConfig.hostParticipates = !roomConfig.hostParticipates"><span /></button>
+            <button class="switch" :class="{ active: roomConfig.hostParticipates }" role="switch" aria-label="房主参与游戏" :aria-checked="roomConfig.hostParticipates" @click="roomConfig.hostParticipates = !roomConfig.hostParticipates"><span /></button>
           </div>
         </div>
-        <p v-if="!configValid" class="validation-message"><WarningCircle :size="18" /> 卧底人数必须少于其他参赛者，且总人数为 3–12 人。</p>
+        <p v-if="configError" class="validation-message"><WarningCircle :size="18" /> {{ configError }}</p>
         <button class="primary-button bottom-action" :disabled="busy || !configValid" @click="createRoom">
           <SpinnerGap v-if="busy" class="spin" :size="20" />
           <Sparkle v-else :size="20" weight="fill" />
@@ -484,16 +579,21 @@ onBeforeUnmount(() => {
           <h2>输入朋友分享的房间号</h2>
           <p>房间号由 6 位数字组成</p>
         </div>
-        <div class="nickname-summary">
+        <div v-if="!joinNicknameEditing && nicknameValid" class="nickname-summary">
           <span class="avatar-small"><User :size="18" weight="fill" /></span>
           <span><small>使用昵称</small><strong>{{ nickname }}</strong></span>
-          <button class="text-button" @click="screen = 'online'">修改</button>
+          <button class="text-button" aria-label="修改加入房间使用的昵称" @click="editJoinNickname">修改</button>
         </div>
+        <template v-else>
+          <label class="field-label" for="join-nickname">昵称</label>
+          <div class="input-shell"><User :size="20" /><input id="join-nickname" ref="nicknameInput" v-model="nickname" maxlength="12" autocomplete="nickname" placeholder="请输入昵称" /></div>
+          <p class="field-support">输入 1–12 个字符，加入成功后会保存在本机。</p>
+        </template>
         <label class="field-label" for="room-code">6 位房间号</label>
         <div class="input-shell code-input">
-          <input ref="roomCodeInput" id="room-code" v-model="roomCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="例如 277360" @keyup.enter="joinRoom" />
+          <input ref="roomCodeInput" id="room-code" :value="roomCode" inputmode="numeric" autocomplete="one-time-code" placeholder="例如 277360" @input="handleRoomCodeInput" @paste="handleRoomCodePaste" @keyup.enter="joinRoom" />
         </div>
-        <button class="primary-button bottom-action" :disabled="busy || !roomCodeValid" @click="joinRoom">
+        <button class="primary-button bottom-action" :disabled="busy || !roomCodeValid || !nicknameValid" @click="joinRoom">
           <SpinnerGap v-if="busy" class="spin" :size="20" />
           <DoorOpen v-else :size="20" />
           加入房间
@@ -516,7 +616,7 @@ onBeforeUnmount(() => {
         <div class="room-code-card">
           <span>房间号</span>
           <strong>{{ snapshot.roomCode }}</strong>
-          <button @click="copyRoom"><Clipboard :size="17" />复制</button>
+          <button aria-label="邀请朋友加入房间" @click="inviteRoom"><ShareNetwork :size="18" />邀请</button>
         </div>
         <div class="lobby-progress">
           <span>{{ snapshot.participatingPlayerCount === snapshot.requiredPlayerCount ? '人员已到齐，可以开始' : '等待其他玩家加入…' }}</span>
@@ -531,7 +631,7 @@ onBeforeUnmount(() => {
               <small>{{ player.isParticipating ? (player.isOnline ? '在线' : '离线') : '仅主持' }}</small>
             </span>
             <Crown v-if="player.isHost" class="crown" :size="21" weight="fill" />
-            <button v-else-if="isHost && player.isOnline" class="text-button" @click="transferHost(player.id)">转移房主</button>
+            <button v-else-if="isHost && player.isOnline" class="text-button" :aria-label="`转移房主给${player.nickname}`" @click="transferHost(player.id)">转移房主</button>
           </article>
         </div>
         <div class="room-actions">
@@ -564,7 +664,7 @@ onBeforeUnmount(() => {
             <span>{{ index + 1 }}</span>
             <span class="avatar-small"><User :size="18" weight="fill" /></span>
             <strong>{{ playerName(playerId) }} <em v-if="playerId === snapshot.selfId">我</em></strong>
-            <small>{{ index === 0 ? '首先发言' : '等待中' }}</small>
+            <small>第{{ index + 1 }}位</small>
           </article>
         </div>
         <button v-if="snapshot.permissions.canBeginVote" class="primary-button bottom-action" :disabled="busy" @click="simpleAction('game:beginVote')"><CheckCircle :size="20" /> 结束发言，进入匿名投票</button>
@@ -572,6 +672,7 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="snapshot.phase === 'VOTING' || snapshot.phase === 'RUNOFF'">
+        <p v-if="snapshot.phase === 'RUNOFF'" class="phase-notice"><Info :size="18" /> 出现平票，请重新投票</p>
         <div class="vote-hero">
           <span class="phase-icon"><MaskHappy :size="32" weight="fill" /></span>
           <h2>{{ snapshot.phase === 'RUNOFF' ? '平票玩家再次发言' : '选出你怀疑的玩家' }}</h2>
@@ -588,6 +689,8 @@ onBeforeUnmount(() => {
               locked: !snapshot.voting?.allowedTargetIds.includes(targetId),
             }"
             :disabled="!snapshot.voting?.canVote || !snapshot.voting?.allowedTargetIds.includes(targetId)"
+            :aria-label="targetId === snapshot.selfId ? `${playerName(targetId)}，我，不能投给自己` : `选择${playerName(targetId)}`"
+            :title="playerName(targetId)"
             @click="selectedVoteTarget = targetId"
           >
             <span class="avatar-vote"><User :size="27" weight="fill" /></span>
@@ -598,22 +701,26 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <button v-if="snapshot.voting?.canAbstain" class="abstain-button" :class="{ selected: selectedVoteTarget === null }" @click="selectedVoteTarget = null">本轮弃权</button>
-        <div class="vote-status">
-          <span>已提交：<strong>{{ snapshot.voting?.submittedCount }} / {{ snapshot.voting?.eligibleCount }}</strong></span>
-          <span v-if="voteSeconds !== null">剩余 <strong>{{ voteSeconds }}s</strong></span>
-          <span v-else>重投不限时</span>
+        <div class="vote-submit-bar">
+          <div class="vote-status">
+            <span>已提交：<strong>{{ snapshot.voting?.submittedCount }} / {{ snapshot.voting?.eligibleCount }}</strong></span>
+            <span v-if="voteSeconds !== null">剩余 <strong>{{ voteSeconds }}s</strong></span>
+            <span v-else>重投不限时</span>
+          </div>
+          <p v-if="snapshot.voting?.canVote" class="vote-selection">已选择：<strong>{{ selectedVoteLabel }}</strong></p>
+          <button v-if="snapshot.voting?.canVote" class="primary-button" :disabled="!canSubmitVote" @click="submitVote">确认匿名投票</button>
+          <p v-else class="action-hint">你的投票已提交，等待其他玩家</p>
+          <button v-if="snapshot.permissions.canFinishRunoff" class="secondary-button" @click="confirmAction = 'finish-runoff'">结束重投并结算</button>
         </div>
-        <button v-if="snapshot.voting?.canVote" class="primary-button" :disabled="!canSubmitVote" @click="submitVote">确认匿名投票</button>
-        <p v-else class="action-hint">你的投票已提交，等待其他玩家</p>
-        <button v-if="snapshot.permissions.canFinishRunoff" class="secondary-button" @click="confirmAction = 'finish-runoff'">结束重投并结算</button>
       </template>
 
       <template v-else-if="snapshot.phase === 'ROUND_RESULT' && snapshot.roundResult">
         <div class="result-hero">
           <span class="result-icon"><WarningCircle :size="36" weight="fill" /></span>
           <h2>{{ snapshot.roundResult.eliminatedPlayerId ? `${playerName(snapshot.roundResult.eliminatedPlayerId)} 被淘汰` : '本轮无人淘汰' }}</h2>
-          <p>身份暂不公开，5 秒后自动进入下一轮</p>
+          <p>身份暂不公开，下一轮将在 {{ roundResultSeconds }} 秒后开始</p>
         </div>
+        <div class="round-progress" role="progressbar" aria-label="进入下一轮倒计时" :aria-valuenow="roundResultProgress" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${roundResultProgress}%` }" /></div>
         <div class="tally-card card-surface">
           <article v-for="item in snapshot.roundResult.tallies" :key="item.playerId">
             <span class="avatar-small"><User :size="18" weight="fill" /></span>
