@@ -34,6 +34,9 @@ import type {
   ServerToClientEvents,
   SessionCredentials,
 } from "@maskword/shared";
+import VictoryHero from "./components/VictoryHero.vue";
+import undercoverMarkUrl from "./assets/undercover-mark.webp";
+import offlineHeroUrl from "./assets/maskword-offline-hero.webp";
 import { buildRoomInviteUrl, extractRoomCode, normalizeRoomCodeInput } from "./online-utils";
 
 type LandingScreen = "modes" | "online" | "create" | "join" | "offline";
@@ -474,7 +477,7 @@ onBeforeUnmount(() => {
 
       <template v-if="screen === 'modes'">
         <div class="brand-lockup">
-          <div class="brand-mark"><MaskHappy :size="34" weight="fill" /></div>
+          <div class="brand-mark"><img :src="undercoverMarkUrl" alt="" /></div>
           <h1>谁是卧底</h1>
           <p>聚会必备推理游戏</p>
         </div>
@@ -489,12 +492,13 @@ onBeforeUnmount(() => {
         </button>
 
         <button class="mode-card mode-card-muted offline-mode-card" @click="screen = 'offline'">
+          <img class="mode-card-art" :src="offlineHeroUrl" alt="四位朋友围坐在一部手机旁玩线下游戏" />
           <span class="mode-copy">
             <strong>线下同屏</strong>
             <small>一台手机轮流查看身份</small>
             <em>本机开始 <ArrowRight :size="17" weight="bold" /></em>
           </span>
-          <UsersThree :size="34" weight="fill" />
+          <span class="mode-card-symbol"><UsersThree :size="28" weight="fill" /></span>
         </button>
       </template>
 
@@ -732,15 +736,17 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="snapshot.phase === 'ENDED' && snapshot.finalResult">
-        <div class="end-hero">
-          <Sparkle :size="34" weight="fill" />
-          <h2>{{ snapshot.finalResult.winner === 'CIVILIAN' ? '平民阵营胜利！' : '卧底阵营胜利！' }}</h2>
-          <p>{{ snapshot.finalResult.winner === 'CIVILIAN' ? '所有卧底已被找出' : '卧底已掌控场上局势' }}</p>
-        </div>
+        <VictoryHero
+          :title="snapshot.finalResult.winner === 'CIVILIAN' ? '平民阵营胜利！' : '卧底阵营胜利！'"
+          :subtitle="snapshot.finalResult.winner === 'CIVILIAN' ? '所有卧底已被找出' : '卧底已掌控场上局势'"
+        />
         <div class="word-reveal card-surface"><div><span>平民词</span><strong>{{ snapshot.finalResult.civilianWord }}</strong></div><div><span>卧底词</span><strong>{{ snapshot.finalResult.undercoverWord }}</strong></div></div>
         <div class="final-list card-surface">
           <article v-for="player in snapshot.finalResult.players" :key="player.id">
-            <span class="avatar-small"><User :size="18" weight="fill" /></span>
+            <span class="avatar-small" :class="{ 'undercover-photo': player.role === 'UNDERCOVER' }">
+              <img v-if="player.role === 'UNDERCOVER'" :src="undercoverMarkUrl" alt="" />
+              <User v-else :size="18" weight="fill" />
+            </span>
             <strong>{{ player.nickname }}</strong>
             <span class="role-badge" :class="player.role.toLowerCase()">{{ roleLabels[player.role] }}</span>
             <small>{{ player.hasLeft ? '已退出' : player.isAlive ? '存活' : '已淘汰' }}</small>

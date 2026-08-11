@@ -21,6 +21,8 @@ import {
   PhUsersThree as UsersThree,
   PhWarningCircle as WarningCircle,
 } from "@phosphor-icons/vue";
+import VictoryHero from "../components/VictoryHero.vue";
+import undercoverMarkUrl from "../assets/undercover-mark.webp";
 import { createOfflineGame } from "./useOfflineGame";
 
 const emit = defineEmits<{ exit: [] }>();
@@ -254,9 +256,9 @@ onBeforeUnmount(() => {
     </template>
 
     <template v-else-if="state.phase === 'ENDED' && state.winner">
-      <div class="end-hero"><Sparkle :size="34" weight="fill" /><h2>{{ state.winner === 'CIVILIAN' ? '平民阵营胜利！' : '卧底阵营胜利！' }}</h2><p>本局身份现已全部公开</p></div>
+      <VictoryHero :title="state.winner === 'CIVILIAN' ? '平民阵营胜利！' : '卧底阵营胜利！'" subtitle="本局身份现已全部公开" />
       <div class="word-reveal card-surface"><div><span>平民词</span><strong>{{ state.wordPair.civilian }}</strong></div><div><span>卧底词</span><strong>{{ state.wordPair.undercover }}</strong></div></div>
-      <div class="final-list card-surface"><article v-for="member in state.members.filter(item => item.participates)" :key="member.id"><span class="avatar-small"><User :size="18" weight="fill" /></span><strong>{{ member.nickname }}</strong><span v-if="member.role" class="role-badge" :class="member.role.toLowerCase()">{{ roleLabels[member.role] }}</span><small>{{ member.left ? '已退出' : member.alive ? '存活' : '已淘汰' }}</small></article></div>
+      <div class="final-list card-surface"><article v-for="member in state.members.filter(item => item.participates)" :key="member.id"><span class="avatar-small" :class="{ 'undercover-photo': member.role === 'UNDERCOVER' }"><img v-if="member.role === 'UNDERCOVER'" :src="undercoverMarkUrl" alt="" /><User v-else :size="18" weight="fill" /></span><strong>{{ member.nickname }}</strong><span v-if="member.role" class="role-badge" :class="member.role.toLowerCase()">{{ roleLabels[member.role] }}</span><small>{{ member.left ? '已退出' : member.alive ? '存活' : '已淘汰' }}</small></article></div>
       <button class="primary-button" @click="game.rematch()"><Sparkle :size="20" weight="fill" />再来一局</button>
       <button class="secondary-button" @click="exitOffline">结束并返回首页</button>
     </template>
