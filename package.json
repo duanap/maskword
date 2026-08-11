@@ -1,0 +1,18 @@
+{
+  "name": "maskword",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @maskword/server --filter @maskword/web dev",
+    "build": "pnpm --filter @maskword/shared build && pnpm --filter @maskword/server build && pnpm --filter @maskword/web build",
+    "test": "pnpm --filter @maskword/server test && pnpm --filter @maskword/web test:unit",
+    "test:integration": "pnpm --filter @maskword/server test:integration",
+    "test:e2e": "pnpm --filter @maskword/web test:e2e",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  }
+}
