@@ -1,12 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { io as createClient, type Socket as ClientSocket } from "socket.io-client";
-import type {
-  Ack,
-  ClientToServerEvents,
-  RoomConfig,
-  RoomSnapshot,
-  ServerToClientEvents,
-  SessionCredentials,
+import { DEFAULT_ROLE_CONFIGS, type Ack, type ClientToServerEvents, type RoomConfig, type RoomSnapshot,
+  type ServerToClientEvents, type SessionCredentials,
 } from "@maskword/shared";
 import { createApp } from "../src/app.js";
 import { RoomService } from "../src/game/room-service.js";
@@ -50,7 +45,7 @@ describe("Socket.IO room flow", () => {
     clients.push(host, guest);
     await Promise.all([waitForConnect(host), waitForConnect(guest)]);
 
-    const config: RoomConfig = { civilianCount: 2, undercoverCount: 1, blankCount: 0, hostParticipates: true };
+    const config: RoomConfig = { ...DEFAULT_ROLE_CONFIGS[3]!, civilianCount: 2, undercoverCount: 1, blankCount: 0, hostParticipates: true };
     const hostCredentials = await new Promise<SessionCredentials>((resolve, reject) => {
       host.emit("room:create", { nickname: "房主", config }, (result: Ack<SessionCredentials>) => {
         if (result.ok && "data" in result) resolve(result.data);

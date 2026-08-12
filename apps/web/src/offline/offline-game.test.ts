@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadOfflineState, normalizedForStorage, OFFLINE_STORAGE_KEY } from "./offline-storage";
 import { createOfflineGame, validateOfflineSetup } from "./useOfflineGame";
+import { DEFAULT_ROLE_CONFIGS } from "@maskword/shared";
 import type { OfflineGameState, OfflineSetup } from "./types";
 
 function installStorage() {
@@ -15,17 +16,12 @@ function installStorage() {
 }
 
 function setup(count = 3, hostParticipates = true): OfflineSetup {
-  const presets = {
-    3: { civilianCount: 2, undercoverCount: 1, blankCount: 0 },
-    4: { civilianCount: 3, undercoverCount: 1, blankCount: 0 },
-    6: { civilianCount: 4, undercoverCount: 1, blankCount: 1 },
-  } as const;
   const memberCount = count + (hostParticipates ? 0 : 1);
   return {
     participantCount: count,
     hostParticipates,
     names: Array.from({ length: memberCount }, (_, index) => index === 0 ? "主持人" : `玩家${index + 1}`),
-    config: { ...(presets[count as keyof typeof presets] ?? presets[3]), hostParticipates },
+    config: { ...(DEFAULT_ROLE_CONFIGS[count] ?? DEFAULT_ROLE_CONFIGS[3]!), hostParticipates, resultAdvance: "MANUAL" },
   };
 }
 
@@ -103,7 +99,7 @@ describe("offline game", () => {
     expect(game.state.value!.candidateIds).toEqual(["local-1", "local-2"]);
     game.finishRunoff();
     expect(game.state.value!.phase).toBe("ROUND_RESULT");
-    expect(game.state.value!.roundResult?.eliminatedPlayerId).toBeNull();
+    expect(game.state.value!.roundResult?.eliminatedPlayerIds).toEqual([]);
     expect(game.state.value!.roundResult?.abstainCount).toBe(4);
   });
 
@@ -149,13 +145,13 @@ describe("offline storage", () => {
     const game = createOfflineGame(() => 0);
     game.start(setup());
     const saved = JSON.parse(values.get(OFFLINE_STORAGE_KEY)!) as OfflineGameState;
-    expect(saved.schemaVersion).toBe(1);
+    expect(saved.schemaVersion).toBe(2);
     expect(saved.privacy.mode).toBe("HANDOFF");
   });
 
   it("rejects a corrupt save and reports that it was safely cleared", () => {
     localStorage.setItem(OFFLINE_STORAGE_KEY, "{broken");
-    expect(loadOfflineState()).toEqual({ state: null, corrupted: true });
+    expect(loadOfflineState()).toEqual({ state: null, corrupted: true, legacyCleared: false });
     expect(localStorage.getItem(OFFLINE_STORAGE_KEY)).toBeNull();
   });
 });

@@ -83,7 +83,7 @@ export async function createApp(roomService = new RoomService()) {
 
     socket.on("room:create", (input, ack) => {
       try {
-        const credentials = roomService.createRoom(input.nickname, input.config, socket.id);
+        const credentials = roomService.createRoom(input.nickname, input.config, socket.id, input.customWords);
         socket.join(credentials.roomCode);
         ack(ok<SessionCredentials>(credentials));
         publishRoom(credentials.roomCode);
@@ -117,9 +117,13 @@ export async function createApp(roomService = new RoomService()) {
     socket.on("room:leave", (ack) => guarded(() => roomService.leaveRoom(socket.id), ack));
     socket.on("room:dissolve", (ack) => guarded(() => roomService.dissolveRoom(socket.id), ack));
     socket.on("room:transferHost", (targetId, ack) => guarded(() => roomService.transferHost(socket.id, targetId), ack));
+    socket.on("room:changeAvatar", (avatarId, ack) => guarded(() => roomService.changeAvatar(socket.id, avatarId), ack));
     socket.on("game:start", (ack) => guarded(() => roomService.startGame(socket.id), ack));
+    socket.on("game:startSpeaking", (ack) => guarded(() => roomService.startSpeaking(socket.id), ack));
+    socket.on("game:endSpeaking", (ack) => guarded(() => roomService.endSpeaking(socket.id), ack));
     socket.on("game:beginVote", (ack) => guarded(() => roomService.beginVote(socket.id), ack));
-    socket.on("vote:submit", (targetId, ack) => guarded(() => roomService.submitVote(socket.id, targetId), ack));
+    socket.on("game:advanceRound", (ack) => guarded(() => roomService.advanceRound(socket.id), ack));
+    socket.on("vote:submit", (submission, ack) => guarded(() => roomService.submitVote(socket.id, submission), ack));
     socket.on("vote:finishRunoff", (ack) => guarded(() => roomService.finishRunoff(socket.id), ack));
     socket.on("game:rematch", (ack) => guarded(() => roomService.rematch(socket.id), ack));
     socket.on("disconnect", () => roomService.disconnect(socket.id));

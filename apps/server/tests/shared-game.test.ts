@@ -1,23 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ROLE_CONFIGS,
+  WORD_CATEGORIES,
+  WORD_DIFFICULTIES,
   WORD_PAIRS,
   createRoleDeck,
   createSpeakingOrder,
   determineWinner,
+  filterWordPairs,
+  normalizeGuess,
   roleConfigError,
   settleVotes,
 } from "@maskword/shared";
 
 describe("shared game rules", () => {
   it("keeps one complete, duplicate-free 400-pair word library for every game mode", () => {
-    expect(WORD_PAIRS).toHaveLength(400);
+    expect(WORD_PAIRS.length).toBeGreaterThanOrEqual(570);
 
     const words = WORD_PAIRS.flatMap((pair) => [pair.civilian, pair.undercover]);
-    expect(new Set(words).size).toBe(800);
+    expect(new Set(words).size).toBe(words.length);
 
     const pairKeys = WORD_PAIRS.map((pair) => [pair.civilian, pair.undercover].sort().join("\u0000"));
-    expect(new Set(pairKeys).size).toBe(400);
+    expect(new Set(pairKeys).size).toBe(WORD_PAIRS.length);
 
     const hasPair = (civilian: string, undercover: string) =>
       WORD_PAIRS.some(
@@ -36,13 +40,26 @@ describe("shared game rules", () => {
       const preset = DEFAULT_ROLE_CONFIGS[count];
       expect(preset).toBeDefined();
       const config = { ...preset!, hostParticipates: true };
-      expect(config.civilianCount + config.undercoverCount + config.blankCount).toBe(count);
+      expect(config.civilianCount + config.undercoverCount + config.blankCount + config.doubleAgentCount).toBe(count);
       expect(roleConfigError(config)).toBeNull();
     }
   });
 
+  it("provides audited metadata pools for every category and difficulty", () => {
+    expect(WORD_PAIRS.filter((pair) => pair.audience === "GENERAL").length).toBeGreaterThanOrEqual(150);
+    for (const category of WORD_CATEGORIES) {
+      const categoryPool = WORD_PAIRS.filter((pair) => category === "GENERAL" ? pair.audience === "GENERAL" : pair.category === category);
+      expect(categoryPool.length).toBeGreaterThanOrEqual(30);
+      for (const difficulty of WORD_DIFFICULTIES) expect(filterWordPairs(category, difficulty).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("normalizes self-destruct guesses with NFKC, whitespace removal and case folding", () => {
+    expect(normalizeGuess("Ａ b\nC ")).toBe(normalizeGuess("abc"));
+  });
+
   it("deals the requested roles and protects a non-blank first speaker", () => {
-    const config = { civilianCount: 3, undercoverCount: 1, blankCount: 1, hostParticipates: true };
+    const config = { ...DEFAULT_ROLE_CONFIGS[5]!, civilianCount: 3, undercoverCount: 1, blankCount: 1, hostParticipates: true };
     const roles = createRoleDeck(config, () => 0);
     expect(roles.filter((role) => role === "CIVILIAN")).toHaveLength(3);
     expect(roles.filter((role) => role === "UNDERCOVER")).toHaveLength(1);

@@ -1,6 +1,9 @@
+import type { WordCategory, WordDifficulty } from "./index.ts";
 import type { WordPair } from "./game.ts";
 
-export const WORD_PAIRS: readonly WordPair[] = [
+type RawPair = Pick<WordPair, "civilian" | "undercover">;
+
+const BASE_PAIRS: readonly RawPair[] = [
   { civilian: "牛奶", undercover: "豆浆" },
   { civilian: "可乐", undercover: "雪碧" },
   { civilian: "咖啡", undercover: "奶茶" },
@@ -402,3 +405,222 @@ export const WORD_PAIRS: readonly WordPair[] = [
   { civilian: "内存", undercover: "硬盘" },
   { civilian: "像素", undercover: "分辨率" },
 ] as const;
+
+const CURATED_PAIRS: readonly WordPair[] = [
+  // 欢乐搞笑：高共鸣、低门槛，重点是描述空间而非网络黑话。
+  { civilian: "社恐", undercover: "社牛", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "摸鱼", undercover: "赶进度", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "早八", undercover: "熬夜", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "自拍", undercover: "他拍", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "表情包", undercover: "斗图", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "夹娃娃", undercover: "抽盲盒", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "赖床", undercover: "回笼觉", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "忘带钥匙", undercover: "忘带手机", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "抢红包", undercover: "拼手速", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "放鸽子", undercover: "迟到", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "拍马屁", undercover: "彩虹屁", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "吃瓜群众", undercover: "围观群众", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "显眼包", undercover: "气氛组", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "碎碎念", undercover: "自言自语", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "路痴", undercover: "脸盲", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "选择困难", undercover: "拖延症", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "冷笑话", undercover: "谐音梗", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "蹭饭", undercover: "打包", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "甩锅", undercover: "背锅", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "画大饼", undercover: "灌鸡汤", category: "FUNNY", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "空耳", undercover: "听岔", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "蹭网", undercover: "借充电宝", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "已读不回", undercover: "正在输入", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "网抑云", undercover: "深夜emo", category: "FUNNY", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "假装听懂", undercover: "不懂装懂", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "临时抱佛脚", undercover: "考前突击", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "手滑点赞", undercover: "误发消息", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "人菜瘾大", undercover: "又菜又爱玩", category: "FUNNY", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "嘴硬", undercover: "心虚", category: "FUNNY", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "凑热闹", undercover: "赶时髦", category: "FUNNY", difficulty: "STANDARD", audience: "GENERAL" },
+
+  // 成语文化。
+  { civilian: "画蛇添足", undercover: "多此一举", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "守株待兔", undercover: "刻舟求剑", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "掩耳盗铃", undercover: "自欺欺人", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "亡羊补牢", undercover: "未雨绸缪", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "雪中送炭", undercover: "锦上添花", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "狐假虎威", undercover: "仗势欺人", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "井底之蛙", undercover: "坐井观天", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "杯弓蛇影", undercover: "草木皆兵", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "闻鸡起舞", undercover: "悬梁刺股", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "滥竽充数", undercover: "鱼目混珠", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "对牛弹琴", undercover: "鸡同鸭讲", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "叶公好龙", undercover: "口是心非", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "盲人摸象", undercover: "管中窥豹", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "鹤立鸡群", undercover: "脱颖而出", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "虎头蛇尾", undercover: "有始无终", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "一箭双雕", undercover: "一举两得", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "破釜沉舟", undercover: "背水一战", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "纸上谈兵", undercover: "夸夸其谈", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "东山再起", undercover: "卷土重来", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "四面楚歌", undercover: "腹背受敌", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "指鹿为马", undercover: "颠倒黑白", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "三顾茅庐", undercover: "礼贤下士", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "望梅止渴", undercover: "画饼充饥", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "水滴石穿", undercover: "铁杵成针", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "胸有成竹", undercover: "成竹在胸", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+  { civilian: "惊弓之鸟", undercover: "漏网之鱼", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "风吹草动", undercover: "蛛丝马迹", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "九牛一毛", undercover: "沧海一粟", category: "IDIOM", difficulty: "STANDARD", audience: "GENERAL" },
+  { civilian: "瓜田李下", undercover: "避嫌", category: "IDIOM", difficulty: "HARD", audience: "GENERAL" },
+  { civilian: "开门见山", undercover: "直截了当", category: "IDIOM", difficulty: "EASY", audience: "GENERAL" },
+
+  // 游戏通用。
+  { civilian: "排位赛", undercover: "匹配赛", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "单机游戏", undercover: "联机游戏", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "主机", undercover: "掌机", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "皮肤", undercover: "道具", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "存档点", undercover: "复活点", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "新手村", undercover: "主城", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "血条", undercover: "蓝条", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "暴击", undercover: "连击", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "副本", undercover: "秘境", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "团战", undercover: "遭遇战", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "坦克位", undercover: "治疗位", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "近战", undercover: "远程", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "任务奖励", undercover: "成就奖励", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "每日签到", undercover: "赛季通行证", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "开黑", undercover: "单排", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "补刀", undercover: "抢人头", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "草丛埋伏", undercover: "绕后偷袭", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "读条", undercover: "冷却", category: "GAME", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "装备栏", undercover: "背包栏", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "游戏手柄", undercover: "机械键盘", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "回合制", undercover: "即时制", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "开放世界", undercover: "箱庭地图", category: "GAME", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "剧情模式", undercover: "生存模式", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "隐藏关卡", undercover: "彩蛋房间", category: "GAME", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "最终首领", undercover: "精英怪物", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "经验值", undercover: "熟练度", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "金币商店", undercover: "钻石商店", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "语音队友", undercover: "路人队友", category: "GAME", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "游戏攻略", undercover: "速通视频", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "掉线重连", undercover: "强制退出", category: "GAME", difficulty: "STANDARD", audience: "INTEREST" },
+
+  // 王者荣耀：按机制与体验配对，不只按职业。
+  { civilian: "李白", undercover: "韩信", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "后羿", undercover: "鲁班七号", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "妲己", undercover: "安琪拉", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "王昭君", undercover: "甄姬", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "蔡文姬", undercover: "桑启", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "瑶", undercover: "明世隐", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "铠", undercover: "吕布", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "孙悟空", undercover: "典韦", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "兰陵王", undercover: "阿轲", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "百里守约", undercover: "干将莫邪", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "盾山", undercover: "公孙离", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "钟馗", undercover: "玄策", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "东皇太一", undercover: "张良", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "大乔", undercover: "刘邦", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "哪吒", undercover: "司马懿", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "关羽", undercover: "马超", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "花木兰", undercover: "元歌", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "貂蝉", undercover: "上官婉儿", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "诸葛亮", undercover: "不知火舞", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "小乔", undercover: "沈梦溪", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "黄忠", undercover: "伽罗", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "虞姬", undercover: "狄仁杰", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "马可波罗", undercover: "孙尚香", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "项羽", undercover: "廉颇", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "白起", undercover: "苏烈", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "庄周", undercover: "孙膑", category: "HONOR_OF_KINGS", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "鬼谷子", undercover: "鲁班大师", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "云中君", undercover: "娜可露露", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "露娜", undercover: "镜", category: "HONOR_OF_KINGS", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "程咬金", undercover: "猪八戒", category: "HONOR_OF_KINGS", difficulty: "EASY", audience: "INTEREST" },
+
+  // 汽车。
+  { civilian: "宝马", undercover: "奔驰", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "奥迪", undercover: "沃尔沃", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "特斯拉", undercover: "比亚迪", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "蔚来", undercover: "理想", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "小鹏", undercover: "零跑", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "丰田", undercover: "本田", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "大众", undercover: "别克", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "保时捷", undercover: "玛莎拉蒂", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "法拉利", undercover: "兰博基尼", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "路虎", undercover: "吉普", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "SUV", undercover: "MPV", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "轿车", undercover: "旅行车", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "跑车", undercover: "敞篷车", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "越野车", undercover: "皮卡", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "新能源车", undercover: "燃油车", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "纯电动", undercover: "插电混动", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "快充", undercover: "慢充", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "自动泊车", undercover: "定速巡航", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "倒车影像", undercover: "全景影像", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "安全气囊", undercover: "安全带", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "方向盘", undercover: "换挡杆", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "刹车踏板", undercover: "油门踏板", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "天窗", undercover: "遮阳帘", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "后备箱", undercover: "前备箱", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "轮胎", undercover: "轮毂", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "发动机", undercover: "电动机", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "涡轮增压", undercover: "自然吸气", category: "CAR", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "四驱", undercover: "前驱", category: "CAR", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "车钥匙", undercover: "无钥匙进入", category: "CAR", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "洗车", undercover: "打蜡", category: "CAR", difficulty: "EASY", audience: "INTEREST" },
+
+  // 医学健康补充到可独立选择的规模。
+  { civilian: "门诊", undercover: "急诊", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "X光", undercover: "CT", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "感冒", undercover: "过敏", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "听诊器", undercover: "血压计", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "创可贴", undercover: "纱布", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "药片", undercover: "胶囊", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "输液", undercover: "打针", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "验血", undercover: "验尿", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "发烧", undercover: "中暑", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "咳嗽", undercover: "打喷嚏", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "骨折", undercover: "扭伤", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "近视", undercover: "散光", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "拔牙", undercover: "补牙", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "麻醉", undercover: "镇痛", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "住院", undercover: "留观", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "处方药", undercover: "非处方药", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "康复训练", undercover: "体育锻炼", category: "MEDICAL", difficulty: "STANDARD", audience: "INTEREST" },
+  { civilian: "心电图", undercover: "脑电图", category: "MEDICAL", difficulty: "HARD", audience: "INTEREST" },
+  { civilian: "内科", undercover: "外科", category: "MEDICAL", difficulty: "EASY", audience: "INTEREST" },
+  { civilian: "消毒", undercover: "灭菌", category: "MEDICAL", difficulty: "HARD", audience: "INTEREST" },
+];
+
+function categoryForBaseIndex(index: number): WordCategory {
+  if (index < 30 || (index >= 270 && index < 300)) return "FOOD";
+  if (index < 60 || (index >= 210 && index < 270)) return "DAILY";
+  if (index < 90) return "ANIMAL_NATURE";
+  if (index < 120 || (index >= 350 && index < 360)) return "ENTERTAINMENT";
+  if (index < 150 || (index >= 330 && index < 350)) return "TECH";
+  if (index < 180 || (index >= 300 && index < 330)) return "TRAVEL";
+  if (index < 210) return "SCHOOL_WORK";
+  if (index < 390) return "SCIENCE";
+  return "MEDICAL";
+}
+
+function difficultyForBaseIndex(index: number): WordDifficulty {
+  return index % 5 === 0 ? "EASY" : index % 5 === 4 ? "HARD" : "STANDARD";
+}
+
+const taggedBasePairs: readonly WordPair[] = BASE_PAIRS.map((pair, index) => {
+  const category = categoryForBaseIndex(index);
+  return {
+    ...pair,
+    category,
+    difficulty: difficultyForBaseIndex(index),
+    audience: ["TECH", "MEDICAL", "SCIENCE"].includes(category) ? "INTEREST" : "GENERAL",
+  } as WordPair;
+});
+
+export const WORD_PAIRS: readonly WordPair[] = [...taggedBasePairs, ...CURATED_PAIRS];
+
+export function filterWordPairs(category: WordCategory, difficulty: WordDifficulty): WordPair[] {
+  return WORD_PAIRS.filter((pair) => {
+    const categoryMatches = category === "GENERAL" ? pair.audience === "GENERAL" : pair.category === category;
+    return categoryMatches && pair.difficulty === difficulty;
+  });
+}

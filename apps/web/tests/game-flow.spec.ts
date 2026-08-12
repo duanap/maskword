@@ -128,7 +128,7 @@ test("online setup uses fixed participant presets and accessible controls", asyn
 
   for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "参赛人数减一" }).click();
   await expect(page.locator(".participant-summary strong")).toHaveText("3");
-  await page.getByRole("button", { name: "调整身份配置" }).click();
+  await page.getByRole("button", { name: /^高级设置/ }).click();
   await expect(page.getByText("平民数量")).toBeVisible();
   await expect(page.locator(".config-disclosure")).toContainText("2 平民 · 1 卧底 · 0 白板");
   await page.getByRole("switch", { name: "房主参与游戏" }).click();
@@ -193,6 +193,34 @@ test("room invitation prefers system share and treats cancellation as silent", a
   await expect(page.locator(".toast")).toHaveCount(0);
 });
 
+test("an active room rebinds after a transport reconnect without reloading the page", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const hostContext = await browser.newContext();
+  const player2Context = await browser.newContext();
+  const player3Context = await browser.newContext();
+  const host = await hostContext.newPage();
+  const player2 = await player2Context.newPage();
+  const player3 = await player3Context.newPage();
+
+  await openOnline(host, "重连房主");
+  await host.locator(".entry-choice.create").click();
+  for (let index = 0; index < 3; index += 1) await host.getByRole("button", { name: "参赛人数减一" }).click();
+  await host.getByRole("button", { name: "创建房间", exact: true }).click();
+  const roomCode = (await host.locator(".room-code-card strong").textContent())!.trim();
+  await joinRoom(player2, "重连玩家2", roomCode);
+  await expect(host.locator(".player-list")).toContainText("重连玩家2");
+
+  await hostContext.setOffline(true);
+  await expect(host.locator(".connection-pill")).toContainText("重连中", { timeout: 10_000 });
+  await hostContext.setOffline(false);
+  await expect(host.locator(".connection-pill")).toContainText("已连接", { timeout: 20_000 });
+
+  await joinRoom(player3, "重连玩家3", roomCode);
+  await expect(host.locator(".player-list")).toContainText("重连玩家3");
+
+  await Promise.all([hostContext.close(), player2Context.close(), player3Context.close()]);
+});
+
 test("desktop mode home is content-height and vertically centered", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
@@ -232,7 +260,7 @@ test("three players can complete a private game and return to the same lobby", a
   const undercoverIndex = roles.indexOf("卧底");
   expect(undercoverIndex).toBeGreaterThanOrEqual(0);
 
-  await host.getByRole("button", { name: /结束发言/ }).click();
+  await host.getByRole("button", { name: "结束发言，进入匿名投票" }).click();
   for (const page of pages) await expect(page.getByRole("heading", { name: /匿名投票/ })).toBeVisible();
 
   const names = ["房主", "玩家2", "玩家3"];
@@ -273,7 +301,7 @@ test("a tied player still sees self and the anonymous runoff tallies", async ({ 
     joinRoom(player4, "玩家4", roomCode),
   ]);
   await host.getByRole("button", { name: "开始游戏" }).click();
-  await host.getByRole("button", { name: /结束发言/ }).click();
+  await host.getByRole("button", { name: "结束发言，进入匿名投票" }).click();
 
   for (const [page, target] of [
     [host, "玩家2"],
@@ -318,10 +346,10 @@ test("twelve online players reach a usable voting layout", async ({ browser }) =
   await expect(host.getByText("12 / 12")).toBeVisible();
   await host.getByRole("button", { name: "开始游戏" }).click();
   await expect(host.locator(".speaking-list .speaker-row")).toHaveCount(12);
-  await expect(host.locator(".speaking-list")).not.toContainText("等待中");
+  await expect(host.locator(".speaking-list")).toContainText("当前");
   await expect(host.locator(".speaking-list")).not.toContainText("首先发言");
 
-  await host.getByRole("button", { name: /结束发言/ }).click();
+  await host.getByRole("button", { name: "结束发言，进入匿名投票" }).click();
   await expect(host.locator(".vote-player")).toHaveCount(12);
   await host.getByRole("button", { name: /选择很长很长的玩家十一/ }).click();
   await expect(host.getByText("已选择：")).toContainText("很长很长的玩家十一");
@@ -341,9 +369,11 @@ test("six-player game preserves identity on refresh and lets an eliminated host 
   const host = pages[0]!;
   await openOnline(host, "房主");
   await host.locator(".entry-choice.create").click();
-  await host.getByRole("button", { name: "调整身份配置" }).click();
+  await host.getByRole("button", { name: /^高级设置/ }).click();
+  await host.getByRole("button", { name: "平民数量减一" }).click();
   await host.getByRole("button", { name: "平民数量减一" }).click();
   await host.getByRole("button", { name: "卧底数量加一" }).click();
+  await host.getByRole("button", { name: "白板数量加一" }).click();
   await host.getByRole("button", { name: "创建房间", exact: true }).click();
   const roomCode = (await host.locator(".room-code-card strong").textContent())!.trim();
 
@@ -374,7 +404,7 @@ test("six-player game preserves identity on refresh and lets an eliminated host 
   await leaver.getByRole("button", { name: "确认", exact: true }).click();
   await expect(leaver.getByRole("heading", { name: "线上联机" })).toBeVisible();
 
-  await host.getByRole("button", { name: /结束发言/ }).click();
+  await host.getByRole("button", { name: "结束发言，进入匿名投票" }).click();
   for (let index = 0; index < pages.length; index += 1) {
     if (index === leaverIndex) continue;
     const page = pages[index]!;
@@ -385,7 +415,7 @@ test("six-player game preserves identity on refresh and lets an eliminated host 
 
   await expect(host.locator(".round-progress")).toBeVisible();
   await expect(host.getByText(/下一轮将在 [0-5] 秒后开始/)).toBeVisible();
-  await expect(host.getByRole("button", { name: /结束发言/ })).toBeVisible({ timeout: 10_000 });
+  await expect(host.getByRole("button", { name: "结束发言，进入匿名投票" })).toBeVisible({ timeout: 10_000 });
   await expect(host.locator(".speaking-list")).not.toContainText("房主");
   await host.getByRole("button", { name: "房间操作" }).click();
   await expect(host.getByRole("button", { name: "解散房间" })).toBeVisible();
@@ -416,7 +446,7 @@ test("a non-playing host can run a three-player game without receiving a role or
   await expect(host.locator(".identity-card")).toHaveCount(0);
   await expect(host.locator(".speaking-list .speaker-row")).toHaveCount(3);
 
-  await host.getByRole("button", { name: /结束发言/ }).click();
+  await host.getByRole("button", { name: "结束发言，进入匿名投票" }).click();
   await expect(host.getByText("等待房主", { exact: false })).toHaveCount(0);
   await expect(host.getByRole("button", { name: "确认匿名投票" })).toHaveCount(0);
   await expect(host.getByText("已提交：0 / 3")).toBeVisible();

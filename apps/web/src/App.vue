@@ -13,36 +13,47 @@ import {
   PhGearSix as GearSix,
   PhInfo as Info,
   PhMaskHappy as MaskHappy,
+  PhMoon as Moon,
   PhPlay as Play,
   PhSignOut as SignOut,
   PhShareNetwork as ShareNetwork,
   PhSparkle as Sparkle,
+  PhSun as Sun,
   PhSpinnerGap as SpinnerGap,
   PhUser as User,
   PhWarningCircle as WarningCircle,
   PhWifiHigh as WifiHigh,
   PhWifiSlash as WifiSlash,
 } from "@phosphor-icons/vue";
-import { DEFAULT_ROLE_CONFIGS, roleConfigError } from "@maskword/shared";
+import { AVATAR_IDS, DEFAULT_ROLE_CONFIGS, roleConfigError } from "@maskword/shared";
 import type {
   Ack,
+  AvatarId,
   ClientToServerEvents,
+  ErrorCode,
   Role,
   RoomConfig,
   RoomSnapshot,
   ServerToClientEvents,
   SessionCredentials,
+  VoteSubmission,
 } from "@maskword/shared";
+import AvatarBadge from "./components/AvatarBadge.vue";
 import VictoryHero from "./components/VictoryHero.vue";
 import undercoverMarkUrl from "./assets/undercover-mark.webp";
 import offlineHeroUrl from "./assets/maskword-offline-hero.webp";
 import { buildRoomInviteUrl, extractRoomCode, normalizeRoomCodeInput } from "./online-utils";
+import { createThemeController } from "./theme";
 
 type LandingScreen = "modes" | "online" | "create" | "join" | "offline";
 type ConfirmAction = "leave" | "dissolve" | "finish-runoff" | null;
+type ConnectionState = "connecting" | "recovering" | "online" | "offline";
 
 const SESSION_KEY = "maskword-session-v1";
 const ROUND_RESULT_DURATION_MS = 5_000;
+const ROOM_RECOVERY_ACK_TIMEOUT_MS = 8_000;
+const ROOM_RECOVERY_RETRY_DELAY_MS = 1_500;
+const TERMINAL_RECOVERY_ERRORS = new Set<ErrorCode>(["RECOVERY_FAILED", "ROOM_NOT_FOUND", "ROOM_CLOSED"]);
 const savedSession = localStorage.getItem(SESSION_KEY);
 const initialInviteRoomCode = savedSession
   ? null
@@ -52,7 +63,7 @@ const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io({ autoConn
 const screen = ref<LandingScreen>(
   initialInviteRoomCode
     ? "join"
-    : localStorage.getItem("maskword-offline-v1") && !savedSession
+    : localStorage.getItem("maskword-offline-v2") && !savedSession
       ? "offline"
       : "modes",
 );
@@ -61,10 +72,13 @@ const nickname = ref(localStorage.getItem("maskword-nickname") ?? "");
 const roomCode = ref(initialInviteRoomCode ?? "");
 const roomCodeInput = ref<HTMLInputElement | null>(null);
 const nicknameInput = ref<HTMLInputElement | null>(null);
-const connectionState = ref<"connecting" | "online" | "offline">("offline");
+const connectionState = ref<ConnectionState>("offline");
 const busy = ref(false);
 const roleVisible = ref(false);
 const selectedVoteTarget = ref<string | null | undefined>(undefined);
+const selfDestructGuess = ref("");
+const customCivilianWord = ref("");
+const customUndercoverWord = ref("");
 const now = ref(Date.now());
 const toast = ref<{ message: string; tone: "info" | "success" | "error" } | null>(null);
 const modal = ref<{ title: string; body: string; type: "info" | "warning" } | null>(null);
@@ -75,8 +89,13 @@ const joinNicknameEditing = ref(!nickname.value.trim());
 const participantCount = ref(6);
 const roleTimer = ref<ReturnType<typeof setTimeout> | null>(null);
 const toastTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const recoveryTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
+const recoveryRetryTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const recoveryPending = ref(false);
+let recoveryAttempt = 0;
 const pwaUpdateReady = ref(false);
 const ticker = setInterval(() => (now.value = Date.now()), 1_000);
+const theme = createThemeController();
 
 const roomConfig = ref<RoomConfig>({
   ...DEFAULT_ROLE_CONFIGS[6]!,
@@ -84,11 +103,14 @@ const roomConfig = ref<RoomConfig>({
 });
 
 const totalConfigured = computed(
-  () => roomConfig.value.civilianCount + roomConfig.value.undercoverCount + roomConfig.value.blankCount,
+  () => roomConfig.value.civilianCount + roomConfig.value.undercoverCount + roomConfig.value.blankCount + roomConfig.value.doubleAgentCount,
 );
 const self = computed(() => snapshot.value?.players.find((player) => player.id === snapshot.value?.selfId) ?? null);
 const isHost = computed(() => snapshot.value?.hostId === snapshot.value?.selfId);
 const playerById = computed(() => new Map(snapshot.value?.players.map((player) => [player.id, player]) ?? []));
+const occupiedAvatarIds = computed(
+  () => new Set(snapshot.value?.players.filter((player) => player.id !== snapshot.value?.selfId).map((player) => player.avatarId) ?? []),
+);
 const aliveCount = computed(() => snapshot.value?.players.filter((player) => player.isParticipating && player.isAlive).length ?? 0);
 const voteSeconds = computed(() => {
   const deadline = snapshot.value?.voting?.deadlineAt;
@@ -104,8 +126,12 @@ const roundResultProgress = computed(() => {
   return Math.max(0, Math.min(100, ((deadline - now.value) / ROUND_RESULT_DURATION_MS) * 100));
 });
 const canSubmitVote = computed(
-  () => snapshot.value?.voting?.canVote && selectedVoteTarget.value !== undefined && !busy.value,
+  () => connectionState.value === "online" && snapshot.value?.voting?.canVote && selectedVoteTarget.value !== undefined && !busy.value,
 );
+const speakingSeconds = computed(() => {
+  const deadline = snapshot.value?.speaking?.deadlineAt;
+  return deadline ? Math.max(0, Math.ceil((deadline - now.value) / 1_000)) : null;
+});
 const normalizedNickname = computed(() => nickname.value.trim().replace(/\s+/g, " "));
 const nicknameValid = computed(() => {
   const length = [...normalizedNickname.value].length;
@@ -133,8 +159,15 @@ const selectedVoteLabel = computed(() => {
   return playerName(selectedVoteTarget.value);
 });
 const canShowPwaUpdate = computed(
-  () => pwaUpdateReady.value && screen.value === "modes" && !snapshot.value && !localStorage.getItem("maskword-offline-v1"),
+  () => pwaUpdateReady.value && screen.value === "modes" && !snapshot.value && !localStorage.getItem("maskword-offline-v2"),
 );
+const roomConnectionReady = computed(() => socket.connected && connectionState.value === "online");
+const connectionLabel = computed(() => {
+  if (connectionState.value === "online") return "已连接";
+  if (connectionState.value === "connecting") return "连接中";
+  if (connectionState.value === "recovering") return "正在同步房间";
+  return "重连中";
+});
 
 const phaseTitle = computed(() => {
   const phase = snapshot.value?.phase;
@@ -151,7 +184,26 @@ const roleLabels: Record<Role, string> = {
   CIVILIAN: "平民",
   UNDERCOVER: "卧底",
   BLANK: "白板",
+  DOUBLE_AGENT: "双面间谍",
 };
+
+const modeLabels: Record<RoomConfig["mode"], string> = {
+  CLASSIC_REVEALED: "经典明牌",
+  CLASSIC_HIDDEN: "经典暗牌",
+  EXPLOSIVE_REVEALED: "明牌自爆",
+  EXPLOSIVE_HIDDEN: "暗牌自爆",
+};
+
+const categoryOptions = [
+  ["GENERAL", "全民精选"], ["FUNNY", "欢乐搞笑"], ["IDIOM", "成语文化"], ["FOOD", "食物饮品"],
+  ["ANIMAL_NATURE", "动物自然"], ["DAILY", "日常生活"], ["SCHOOL_WORK", "校园职场"], ["TRAVEL", "旅行出行"],
+  ["ENTERTAINMENT", "影视综艺"], ["TECH", "数码互联网"], ["MEDICAL", "医学健康"], ["GAME", "游戏通用"],
+  ["HONOR_OF_KINGS", "王者荣耀英雄"], ["CAR", "汽车"], ["SCIENCE", "轻科普"],
+] as const;
+const snapshotCategoryLabel = computed(() => {
+  const category = snapshot.value?.config.wordCategory;
+  return category === "GENERAL" ? "全民精选" : categoryOptions.find((item) => item[0] === category)?.[1] ?? "全民精选";
+});
 
 function showToast(message: string, tone: "info" | "success" | "error" = "info") {
   toast.value = { message, tone };
@@ -181,10 +233,90 @@ function saveSession(credentials: SessionCredentials) {
 }
 
 function clearSession() {
+  cancelRoomRecovery();
   localStorage.removeItem(SESSION_KEY);
   snapshot.value = null;
   roleVisible.value = false;
   selectedVoteTarget.value = undefined;
+}
+
+function clearRecoveryTimers() {
+  if (recoveryTimeout.value) clearTimeout(recoveryTimeout.value);
+  if (recoveryRetryTimer.value) clearTimeout(recoveryRetryTimer.value);
+  recoveryTimeout.value = null;
+  recoveryRetryTimer.value = null;
+}
+
+function cancelRoomRecovery() {
+  recoveryAttempt += 1;
+  recoveryPending.value = false;
+  clearRecoveryTimers();
+}
+
+function scheduleRoomRecovery() {
+  if (recoveryRetryTimer.value || !getSession()) return;
+  recoveryRetryTimer.value = setTimeout(() => {
+    recoveryRetryTimer.value = null;
+    synchronizeRoomConnection();
+  }, ROOM_RECOVERY_RETRY_DELAY_MS);
+}
+
+function handleRecoveryTimeout(attempt: number) {
+  if (attempt !== recoveryAttempt) return;
+  recoveryPending.value = false;
+  recoveryTimeout.value = null;
+  connectionState.value = socket.connected ? "recovering" : "offline";
+  scheduleRoomRecovery();
+}
+
+function synchronizeRoomConnection() {
+  const session = getSession();
+  if (!session) {
+    cancelRoomRecovery();
+    connectionState.value = socket.connected ? "online" : "offline";
+    return;
+  }
+  if (!socket.connected) {
+    connectionState.value = "connecting";
+    socket.connect();
+    return;
+  }
+  if (recoveryPending.value) return;
+
+  clearRecoveryTimers();
+  recoveryPending.value = true;
+  connectionState.value = "recovering";
+  const attempt = ++recoveryAttempt;
+  recoveryTimeout.value = setTimeout(() => handleRecoveryTimeout(attempt), ROOM_RECOVERY_ACK_TIMEOUT_MS);
+  socket.emit("room:resume", session, (result) => {
+    if (attempt !== recoveryAttempt) return;
+    if (recoveryTimeout.value) clearTimeout(recoveryTimeout.value);
+    recoveryTimeout.value = null;
+    if (!result.ok) {
+      recoveryPending.value = false;
+      if (TERMINAL_RECOVERY_ERRORS.has(result.code)) {
+        clearSession();
+        connectionState.value = "online";
+        screen.value = "online";
+        showToast(result.message, "error");
+        return;
+      }
+      scheduleRoomRecovery();
+      return;
+    }
+    recoveryPending.value = true;
+    if (recoveryRetryTimer.value) clearTimeout(recoveryRetryTimer.value);
+    recoveryRetryTimer.value = null;
+    // 传输层已连接不代表房间状态已恢复；必须等待服务端的全量快照。
+    recoveryTimeout.value = setTimeout(() => handleRecoveryTimeout(attempt), ROOM_RECOVERY_ACK_TIMEOUT_MS);
+  });
+}
+
+function ensureRoomConnectionReady(): boolean {
+  if (socket.connected && connectionState.value === "online") return true;
+  synchronizeRoomConnection();
+  showToast("正在恢复房间，请稍候");
+  return false;
 }
 
 function handleAck(result: Ack, success?: () => void) {
@@ -208,7 +340,14 @@ function ensureNickname(): boolean {
 }
 
 function ensureSocketConnected() {
-  if (socket.connected || socket.active) return;
+  if (socket.connected) {
+    if (getSession() && connectionState.value !== "online") synchronizeRoomConnection();
+    return;
+  }
+  if (socket.active) {
+    connectionState.value = "connecting";
+    return;
+  }
   connectionState.value = "connecting";
   socket.connect();
 }
@@ -236,7 +375,10 @@ function createRoom() {
   }
   ensureSocketConnected();
   busy.value = true;
-  socket.emit("room:create", { nickname: nickname.value, config: roomConfig.value }, (result) => {
+  const customWords = !roomConfig.value.hostParticipates && customCivilianWord.value.trim() && customUndercoverWord.value.trim()
+    ? { civilian: customCivilianWord.value.trim(), undercover: customUndercoverWord.value.trim() }
+    : undefined;
+  socket.emit("room:create", { nickname: nickname.value, config: roomConfig.value, ...(customWords ? { customWords } : {}) }, (result) => {
     handleAck(result, () => {
       if (result.ok && "data" in result) saveSession(result.data);
     });
@@ -260,8 +402,9 @@ function joinRoom() {
 }
 
 function simpleAction(
-  action: "room:leave" | "room:dissolve" | "game:start" | "game:beginVote" | "vote:finishRunoff" | "game:rematch",
+  action: "room:leave" | "room:dissolve" | "game:start" | "game:startSpeaking" | "game:endSpeaking" | "game:beginVote" | "game:advanceRound" | "vote:finishRunoff" | "game:rematch",
 ) {
+  if (!ensureRoomConnectionReady()) return;
   busy.value = true;
   const ack = (result: Ack) =>
     handleAck(result, () => {
@@ -275,26 +418,41 @@ function simpleAction(
   if (action === "room:leave") socket.emit("room:leave", ack);
   else if (action === "room:dissolve") socket.emit("room:dissolve", ack);
   else if (action === "game:start") socket.emit("game:start", ack);
+  else if (action === "game:startSpeaking") socket.emit("game:startSpeaking", ack);
+  else if (action === "game:endSpeaking") socket.emit("game:endSpeaking", ack);
   else if (action === "game:beginVote") socket.emit("game:beginVote", ack);
+  else if (action === "game:advanceRound") socket.emit("game:advanceRound", ack);
   else if (action === "vote:finishRunoff") socket.emit("vote:finishRunoff", ack);
   else socket.emit("game:rematch", ack);
 }
 
 function submitVote() {
-  if (!canSubmitVote.value) return;
+  if (!ensureRoomConnectionReady() || !canSubmitVote.value) return;
   const submittedPhase = snapshot.value?.phase;
   busy.value = true;
-  socket.emit("vote:submit", selectedVoteTarget.value ?? null, (result) => {
+  const submission: VoteSubmission = {
+    targetPlayerId: selectedVoteTarget.value ?? null,
+    ...(snapshot.value?.voting?.canGuess && selfDestructGuess.value.trim() ? { guess: selfDestructGuess.value.trim() } : {}),
+  };
+  socket.emit("vote:submit", submission, (result) => {
     handleAck(result, () => {
       selectedVoteTarget.value = undefined;
+      selfDestructGuess.value = "";
       if (snapshot.value?.phase === submittedPhase) showToast("投票已匿名提交", "success");
     });
   });
 }
 
 function transferHost(targetId: string) {
+  if (!ensureRoomConnectionReady()) return;
   busy.value = true;
   socket.emit("room:transferHost", targetId, (result) => handleAck(result, () => showToast("房主已转移", "success")));
+}
+
+function changeAvatar(avatarId: AvatarId) {
+  if (!snapshot.value?.permissions.canChangeAvatar || busy.value || !ensureRoomConnectionReady()) return;
+  busy.value = true;
+  socket.emit("room:changeAvatar", avatarId, (result) => handleAck(result));
 }
 
 async function inviteRoom() {
@@ -329,17 +487,32 @@ function hideRole() {
   if (roleTimer.value) clearTimeout(roleTimer.value);
 }
 
+function handleVisibilityChange() {
+  hideRole();
+  if (document.visibilityState === "visible" && getSession()) synchronizeRoomConnection();
+}
+
+function handlePageShow() {
+  hideRole();
+  if (getSession()) synchronizeRoomConnection();
+}
+
+function handleNetworkOnline() {
+  if (getSession()) synchronizeRoomConnection();
+  else ensureSocketConnected();
+}
+
 function handlePwaUpdate() {
   pwaUpdateReady.value = true;
 }
 
 function applyPwaUpdate() {
-  if (localStorage.getItem("maskword-offline-v1") || snapshot.value || screen.value !== "modes") return;
+  if (localStorage.getItem("maskword-offline-v2") || snapshot.value || screen.value !== "modes") return;
   void window.maskwordApplyUpdate?.();
 }
 
-function adjustConfig(key: "civilianCount" | "undercoverCount" | "blankCount", delta: number) {
-  const limits: readonly [number, number] = key === "blankCount" ? [0, 2] : [1, participantCount.value - 1];
+function adjustConfig(key: "civilianCount" | "undercoverCount" | "blankCount" | "doubleAgentCount", delta: number) {
+  const limits: readonly [number, number] = key === "blankCount" || key === "doubleAgentCount" ? [0, 2] : [1, participantCount.value - 1];
   roomConfig.value[key] = Math.min(limits[1], Math.max(limits[0], roomConfig.value[key] + delta));
 }
 
@@ -347,7 +520,7 @@ function adjustParticipantCount(delta: number) {
   participantCount.value = Math.min(12, Math.max(3, participantCount.value + delta));
   const preset = DEFAULT_ROLE_CONFIGS[participantCount.value];
   if (!preset) return;
-  roomConfig.value = { ...preset, hostParticipates: roomConfig.value.hostParticipates };
+  roomConfig.value = { ...preset, hostParticipates: roomConfig.value.hostParticipates, resultAdvance: roomConfig.value.resultAdvance };
 }
 
 function handleRoomCodeInput(event: Event) {
@@ -389,20 +562,20 @@ function confirmCurrentAction() {
 }
 
 socket.on("connect", () => {
-  connectionState.value = "online";
-  const session = getSession();
-  if (!session || snapshot.value) return;
-  socket.emit("room:resume", session, (result) => {
-    if (!result.ok) {
-      clearSession();
-      screen.value = "online";
-      showToast(result.message, "error");
-    }
-  });
+  if (getSession()) synchronizeRoomConnection();
+  else connectionState.value = "online";
 });
 socket.on("disconnect", () => {
+  cancelRoomRecovery();
   connectionState.value = "offline";
+  busy.value = false;
   hideRole();
+});
+socket.on("connect_error", () => {
+  connectionState.value = "offline";
+});
+socket.io.on("reconnect_attempt", () => {
+  connectionState.value = "connecting";
 });
 socket.on("room:snapshot", (nextSnapshot) => {
   const phaseChanged = snapshot.value !== null && snapshot.value.phase !== nextSnapshot.phase;
@@ -411,6 +584,10 @@ socket.on("room:snapshot", (nextSnapshot) => {
     selectedVoteTarget.value = undefined;
   }
   snapshot.value = nextSnapshot;
+  if (socket.connected && (recoveryPending.value || connectionState.value !== "online")) {
+    cancelRoomRecovery();
+    connectionState.value = "online";
+  }
   if (nextSnapshot.phase !== "VOTING" && nextSnapshot.phase !== "RUNOFF") selectedVoteTarget.value = undefined;
 });
 socket.on("room:closed", ({ reason }) => {
@@ -430,9 +607,10 @@ watch(
 );
 
 onMounted(() => {
-  document.addEventListener("visibilitychange", hideRole);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("blur", hideRole);
-  window.addEventListener("pageshow", hideRole);
+  window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("online", handleNetworkOnline);
   window.addEventListener("maskword:pwa-update", handlePwaUpdate);
   consumeInviteParameter();
   if (getSession() || screen.value === "join") ensureSocketConnected();
@@ -445,9 +623,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearInterval(ticker);
-  document.removeEventListener("visibilitychange", hideRole);
+  theme.stop();
+  cancelRoomRecovery();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("blur", hideRole);
-  window.removeEventListener("pageshow", hideRole);
+  window.removeEventListener("pageshow", handlePageShow);
+  window.removeEventListener("online", handleNetworkOnline);
   window.removeEventListener("maskword:pwa-update", handlePwaUpdate);
   if (roleTimer.value) clearTimeout(roleTimer.value);
   if (toastTimer.value) clearTimeout(toastTimer.value);
@@ -457,8 +638,12 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="app-shell">
+    <button v-if="!snapshot" class="theme-toggle" :aria-label="theme.effective.value === 'NIGHT' ? '切换到日间模式' : '切换到夜间模式'" @click="theme.toggle()">
+      <Sun v-if="theme.effective.value === 'NIGHT'" :size="19" />
+      <Moon v-else :size="19" />
+    </button>
     <Suspense v-if="screen === 'offline' && !snapshot">
-      <OfflineGame @exit="screen = 'modes'" />
+      <OfflineGame @exit="screen = 'modes'" @toggle-theme="theme.toggle()" />
       <template #fallback>
         <section class="phone-page offline-loading" aria-busy="true">
           <SpinnerGap class="spin" :size="32" />
@@ -543,8 +728,14 @@ onBeforeUnmount(() => {
           <small>支持 3–12 人</small>
         </div>
         <p class="attendance-summary">{{ attendanceSummary }}</p>
+        <div class="config-card v2-config-grid">
+          <label><strong>对局模式</strong><select v-model="roomConfig.mode"><option v-for="(label, value) in modeLabels" :key="value" :value="value">{{ label }}</option></select></label>
+          <p class="play-tip">{{ roomConfig.mode.includes('HIDDEN') ? '开局只知道词语，需要同时推测自己的身份。' : '开局可以看到自己的身份与词语。' }} {{ roomConfig.mode.includes('EXPLOSIVE') ? `第 ${roomConfig.selfDestructRound} 轮普通投票起可密封猜词。` : '本模式无自爆。' }}</p>
+          <label><strong>词组分类</strong><select v-model="roomConfig.wordCategory"><option v-for="item in categoryOptions" :key="item[0]" :value="item[0]">{{ item[1] }}</option></select></label>
+          <label><strong>难度</strong><select v-model="roomConfig.wordDifficulty"><option value="EASY">轻松</option><option value="STANDARD">标准</option><option value="HARD">烧脑</option></select></label>
+        </div>
         <button class="config-disclosure" :aria-expanded="advancedConfigOpen" @click="advancedConfigOpen = !advancedConfigOpen">
-          <span><strong>调整身份配置</strong><small>当前：{{ roomConfig.civilianCount }} 平民 · {{ roomConfig.undercoverCount }} 卧底 · {{ roomConfig.blankCount }} 白板</small></span>
+          <span><strong>高级设置</strong><small>{{ roomConfig.civilianCount }} 平民 · {{ roomConfig.undercoverCount }} 卧底 · {{ roomConfig.blankCount }} 白板 · {{ roomConfig.doubleAgentCount }} 间谍</small></span>
           <CaretDown :size="18" :class="{ rotated: advancedConfigOpen }" />
         </button>
         <div v-if="advancedConfigOpen" class="config-card">
@@ -552,20 +743,28 @@ onBeforeUnmount(() => {
             { key: 'civilianCount', label: '平民数量', hint: '至少 1 人' },
             { key: 'undercoverCount', label: '卧底数量', hint: '至少 1 人' },
             { key: 'blankCount', label: '白板数量', hint: '可选 0–2 人' },
+            { key: 'doubleAgentCount', label: '双面间谍', hint: '只限自爆模式' },
           ]" :key="item.key" class="config-row">
             <div><strong>{{ item.label }}</strong><small>{{ item.hint }}</small></div>
             <div class="stepper">
-              <button :aria-label="`${item.label}减一`" @click="adjustConfig(item.key as 'civilianCount' | 'undercoverCount' | 'blankCount', -1)">−</button>
+              <button :aria-label="`${item.label}减一`" @click="adjustConfig(item.key as 'civilianCount' | 'undercoverCount' | 'blankCount' | 'doubleAgentCount', -1)">−</button>
               <span>{{ roomConfig[item.key as keyof RoomConfig] }}</span>
-              <button :aria-label="`${item.label}加一`" @click="adjustConfig(item.key as 'civilianCount' | 'undercoverCount' | 'blankCount', 1)">＋</button>
+              <button :aria-label="`${item.label}加一`" @click="adjustConfig(item.key as 'civilianCount' | 'undercoverCount' | 'blankCount' | 'doubleAgentCount', 1)">＋</button>
             </div>
           </div>
+          <label class="config-select-row"><strong>自爆提示轮</strong><select v-model.number="roomConfig.selfDestructRound"><option :value="2">第 2 轮</option><option :value="3">第 3 轮</option><option :value="4">第 4 轮</option></select></label>
+          <label class="config-select-row"><strong>发言计时</strong><select v-model.number="roomConfig.speakingSeconds"><option :value="0">关闭</option><option :value="30">30 秒</option><option :value="45">45 秒</option><option :value="60">60 秒</option></select></label>
+          <label class="config-select-row"><strong>结果推进</strong><select v-model="roomConfig.resultAdvance"><option value="AUTO">自动 5 秒</option><option value="MANUAL">房主手动</option></select></label>
         </div>
         <div class="config-card">
           <div class="host-toggle">
             <div><strong>房主参与游戏</strong><small>关闭后只负责主持</small></div>
             <button class="switch" :class="{ active: roomConfig.hostParticipates }" role="switch" aria-label="房主参与游戏" :aria-checked="roomConfig.hostParticipates" @click="roomConfig.hostParticipates = !roomConfig.hostParticipates"><span /></button>
           </div>
+        </div>
+        <div v-if="!roomConfig.hostParticipates" class="config-card custom-words-card">
+          <strong>主持人自定义词语（可选）</strong><small>仅服务端保存，不会出现在房间摘要中</small>
+          <input v-model="customCivilianWord" maxlength="12" placeholder="平民词" /><input v-model="customUndercoverWord" maxlength="12" placeholder="卧底词" />
         </div>
         <p v-if="configError" class="validation-message"><WarningCircle :size="18" /> {{ configError }}</p>
         <button class="primary-button bottom-action" :disabled="busy || !configValid" @click="createRoom">
@@ -607,8 +806,9 @@ onBeforeUnmount(() => {
       <header class="topbar room-topbar">
         <div class="connection-pill" :class="connectionState">
           <WifiHigh v-if="connectionState === 'online'" :size="16" />
+          <SpinnerGap v-else-if="connectionState === 'connecting' || connectionState === 'recovering'" class="spin" :size="16" />
           <WifiSlash v-else :size="16" />
-          {{ connectionState === 'online' ? '已连接' : connectionState === 'connecting' ? '连接中' : '重连中' }}
+          {{ connectionLabel }}
         </div>
         <h1>{{ phaseTitle }}</h1>
         <button class="icon-button" aria-label="房间操作" @click="roomManagementOpen = true"><GearSix :size="21" /></button>
@@ -620,6 +820,8 @@ onBeforeUnmount(() => {
           <strong>{{ snapshot.roomCode }}</strong>
           <button aria-label="邀请朋友加入房间" @click="inviteRoom"><ShareNetwork :size="18" />邀请</button>
         </div>
+        <div class="rules-summary card-surface"><strong>{{ modeLabels[snapshot.config.mode] }}</strong><span>{{ snapshotCategoryLabel }} · {{ snapshot.config.wordDifficulty === 'EASY' ? '轻松' : snapshot.config.wordDifficulty === 'HARD' ? '烧脑' : '标准' }}</span><small>白板 {{ snapshot.config.blankCount }} · 间谍 {{ snapshot.config.doubleAgentCount }} · 发言计时 {{ snapshot.config.speakingSeconds || '关闭' }}</small></div>
+        <div v-if="self && snapshot.permissions.canChangeAvatar" class="avatar-picker card-surface"><strong>选择你的固定头像</strong><div><button v-for="avatarId in AVATAR_IDS" :key="avatarId" :disabled="!roomConnectionReady || occupiedAvatarIds.has(avatarId)" :class="{ selected: self.avatarId === avatarId }" @click="changeAvatar(avatarId)"><AvatarBadge :avatar-id="avatarId" size="small" /></button></div></div>
         <div class="lobby-progress">
           <span>{{ snapshot.participatingPlayerCount === snapshot.requiredPlayerCount ? '人员已到齐，可以开始' : '等待其他玩家加入…' }}</span>
           <strong>{{ snapshot.participatingPlayerCount }} / {{ snapshot.requiredPlayerCount }}</strong>
@@ -627,17 +829,17 @@ onBeforeUnmount(() => {
         <div class="player-list card-surface">
           <article v-for="(player, index) in snapshot.players" :key="player.id" class="player-row">
             <span class="player-index">{{ index + 1 }}</span>
-            <span class="avatar-small"><User :size="18" weight="fill" /></span>
+            <AvatarBadge :avatar-id="player.avatarId" size="small" />
             <span class="player-details">
               <strong>{{ player.nickname }} <em v-if="player.id === snapshot.selfId">我</em></strong>
               <small>{{ player.isParticipating ? (player.isOnline ? '在线' : '离线') : '仅主持' }}</small>
             </span>
             <Crown v-if="player.isHost" class="crown" :size="21" weight="fill" />
-            <button v-else-if="isHost && player.isOnline" class="text-button" :aria-label="`转移房主给${player.nickname}`" @click="transferHost(player.id)">转移房主</button>
+            <button v-else-if="isHost && player.isOnline" class="text-button" :disabled="!roomConnectionReady" :aria-label="`转移房主给${player.nickname}`" @click="transferHost(player.id)">转移房主</button>
           </article>
         </div>
         <div class="room-actions">
-          <button v-if="snapshot.permissions.canStart" class="primary-button" :disabled="busy" @click="simpleAction('game:start')"><Play :size="20" weight="fill" /> 开始游戏</button>
+          <button v-if="snapshot.permissions.canStart" class="primary-button" :disabled="busy || !roomConnectionReady" @click="simpleAction('game:start')"><Play :size="20" weight="fill" /> 开始游戏</button>
           <p v-else-if="isHost" class="action-hint">人数需与身份配置完全一致后才能开始</p>
           <button class="secondary-button danger-soft" @click="confirmAction = isHost ? 'dissolve' : 'leave'"><SignOut :size="19" /> {{ isHost ? '解散房间' : '退出房间' }}</button>
         </div>
@@ -648,7 +850,7 @@ onBeforeUnmount(() => {
           <template v-if="roleVisible">
             <EyeSlash :size="28" />
             <span>我的身份</span>
-            <strong>{{ roleLabels[snapshot.privateIdentity.role] }}</strong>
+            <strong>{{ snapshot.privateIdentity.role ? roleLabels[snapshot.privateIdentity.role] : '身份尚未揭示' }}</strong>
             <small>{{ snapshot.privateIdentity.role === 'BLANK' ? '你没有词语' : `词语：${snapshot.privateIdentity.word}` }}</small>
             <em>点击立即隐藏</em>
           </template>
@@ -664,12 +866,15 @@ onBeforeUnmount(() => {
         <div class="speaking-list card-surface">
           <article v-for="(playerId, index) in snapshot.speakingOrder" :key="playerId" class="speaker-row" :class="{ self: playerId === snapshot.selfId }">
             <span>{{ index + 1 }}</span>
-            <span class="avatar-small"><User :size="18" weight="fill" /></span>
+            <AvatarBadge :avatar-id="playerById.get(playerId)?.avatarId ?? 'robot'" size="small" />
             <strong>{{ playerName(playerId) }} <em v-if="playerId === snapshot.selfId">我</em></strong>
-            <small>第{{ index + 1 }}位</small>
+            <small>{{ snapshot.speaking?.completedPlayerIds.includes(playerId) ? '已发言' : snapshot.speaking?.currentPlayerId === playerId ? '当前' : '等待中' }}</small>
           </article>
         </div>
-        <button v-if="snapshot.permissions.canBeginVote" class="primary-button bottom-action" :disabled="busy" @click="simpleAction('game:beginVote')"><CheckCircle :size="20" /> 结束发言，进入匿名投票</button>
+        <p class="play-tip">描述要足够有信息用于分辨身份，但不要直接说出词语，避免卧底猜中。</p>
+        <button v-if="snapshot.permissions.canStartSpeaking" class="secondary-button" :disabled="!roomConnectionReady" @click="simpleAction('game:startSpeaking')"><Play :size="19" />开始发言</button>
+        <button v-if="snapshot.permissions.canEndSpeaking" class="secondary-button" :disabled="!roomConnectionReady" @click="simpleAction('game:endSpeaking')"><CheckCircle :size="19" />完成当前发言<span v-if="speakingSeconds !== null"> · {{ speakingSeconds }}s</span></button>
+        <button v-if="snapshot.permissions.canBeginVote" class="primary-button bottom-action" :disabled="busy || !roomConnectionReady" @click="simpleAction('game:beginVote')"><CheckCircle :size="20" /> 结束发言，进入匿名投票</button>
         <p v-else class="action-hint">等待房主结束发言并开启投票</p>
       </template>
 
@@ -680,6 +885,7 @@ onBeforeUnmount(() => {
           <h2>{{ snapshot.phase === 'RUNOFF' ? '平票玩家再次发言' : '选出你怀疑的玩家' }}</h2>
           <p>{{ snapshot.phase === 'RUNOFF' ? '讨论结束后重新投票，不限制时间' : '投票关系全程保密，不能投给自己' }}</p>
         </div>
+        <div class="speaking-recap" aria-label="本轮发言顺序"><AvatarBadge v-for="playerId in snapshot.speakingOrder" :key="playerId" :avatar-id="playerById.get(playerId)?.avatarId ?? 'robot'" size="small" /></div>
         <div class="vote-grid">
           <button
             v-for="targetId in snapshot.voting?.candidateIds ?? []"
@@ -690,19 +896,24 @@ onBeforeUnmount(() => {
               'self-candidate': targetId === snapshot.selfId,
               locked: !snapshot.voting?.allowedTargetIds.includes(targetId),
             }"
-            :disabled="!snapshot.voting?.canVote || !snapshot.voting?.allowedTargetIds.includes(targetId)"
+            :disabled="!roomConnectionReady || !snapshot.voting?.canVote || !snapshot.voting?.allowedTargetIds.includes(targetId)"
             :aria-label="targetId === snapshot.selfId ? `${playerName(targetId)}，我，不能投给自己` : `选择${playerName(targetId)}`"
             :title="playerName(targetId)"
             @click="selectedVoteTarget = targetId"
           >
-            <span class="avatar-vote"><User :size="27" weight="fill" /></span>
+            <AvatarBadge :avatar-id="playerById.get(targetId)?.avatarId ?? 'robot'" size="medium" />
             <strong>{{ playerName(targetId) }} <em v-if="targetId === snapshot.selfId">我</em></strong>
             <small v-if="snapshot.phase === 'RUNOFF'">上轮 {{ runoffTallyById.get(targetId) ?? 0 }} 票</small>
             <small v-else-if="targetId === snapshot.selfId">不能投给自己</small>
             <CheckCircle v-if="selectedVoteTarget === targetId" :size="20" weight="fill" />
           </button>
         </div>
-        <button v-if="snapshot.voting?.canAbstain" class="abstain-button" :class="{ selected: selectedVoteTarget === null }" @click="selectedVoteTarget = null">本轮弃权</button>
+        <button v-if="snapshot.voting?.canAbstain" class="abstain-button" :disabled="!roomConnectionReady" :class="{ selected: selectedVoteTarget === null }" @click="selectedVoteTarget = null">本轮弃权</button>
+        <label v-if="snapshot.voting?.canGuess" class="self-destruct-box">
+          <strong>自爆猜词（可选，仅一次）</strong>
+          <small>与选票一起锁定；本轮最终结算后才揭晓。若平票，重投时不能新增或修改。</small>
+          <input v-model="selfDestructGuess" maxlength="12" placeholder="输入你猜的平民词" />
+        </label>
         <div class="vote-submit-bar">
           <div class="vote-status">
             <span>已提交：<strong>{{ snapshot.voting?.submittedCount }} / {{ snapshot.voting?.eligibleCount }}</strong></span>
@@ -712,17 +923,18 @@ onBeforeUnmount(() => {
           <p v-if="snapshot.voting?.canVote" class="vote-selection">已选择：<strong>{{ selectedVoteLabel }}</strong></p>
           <button v-if="snapshot.voting?.canVote" class="primary-button" :disabled="!canSubmitVote" @click="submitVote">确认匿名投票</button>
           <p v-else class="action-hint">你的投票已提交，等待其他玩家</p>
-          <button v-if="snapshot.permissions.canFinishRunoff" class="secondary-button" @click="confirmAction = 'finish-runoff'">结束重投并结算</button>
+          <button v-if="snapshot.permissions.canFinishRunoff" class="secondary-button" :disabled="!roomConnectionReady" @click="confirmAction = 'finish-runoff'">结束重投并结算</button>
         </div>
       </template>
 
       <template v-else-if="snapshot.phase === 'ROUND_RESULT' && snapshot.roundResult">
         <div class="result-hero">
           <span class="result-icon"><WarningCircle :size="36" weight="fill" /></span>
-          <h2>{{ snapshot.roundResult.eliminatedPlayerId ? `${playerName(snapshot.roundResult.eliminatedPlayerId)} 被淘汰` : '本轮无人淘汰' }}</h2>
-          <p>身份暂不公开，下一轮将在 {{ roundResultSeconds }} 秒后开始</p>
+          <h2>{{ snapshot.roundResult.eliminatedPlayerIds.length ? `${snapshot.roundResult.eliminatedPlayerIds.map(playerName).join('、')} 已被淘汰` : '本轮无人淘汰' }}</h2>
+          <p>{{ snapshot.config.resultAdvance === 'AUTO' ? `下一轮将在 ${roundResultSeconds} 秒后开始` : '等待房主进入下一轮' }}</p>
         </div>
-        <div class="round-progress" role="progressbar" aria-label="进入下一轮倒计时" :aria-valuenow="roundResultProgress" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${roundResultProgress}%` }" /></div>
+        <div v-if="snapshot.config.resultAdvance === 'AUTO'" class="round-progress" role="progressbar" aria-label="进入下一轮倒计时" :aria-valuenow="roundResultProgress" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${roundResultProgress}%` }" /></div>
+        <div v-for="result in snapshot.roundResult.selfDestructResults" :key="result.playerId" class="self-destruct-result" :class="{ correct: result.correct }"><strong>{{ result.correct ? `${playerName(result.playerId)} 猜中平民词` : `${result.role === 'DOUBLE_AGENT' ? '间谍' : '卧底'}玩家猜词失败，${playerName(result.playerId)} 已被淘汰` }}</strong><small>猜测：{{ result.guess }}</small></div>
         <div class="tally-card card-surface">
           <article v-for="item in snapshot.roundResult.tallies" :key="item.playerId">
             <span class="avatar-small"><User :size="18" weight="fill" /></span>
@@ -731,6 +943,7 @@ onBeforeUnmount(() => {
           </article>
           <article><span class="avatar-small muted"><SignOut :size="18" /></span><strong>弃权</strong><span>{{ snapshot.roundResult.abstainCount }} 票</span></article>
         </div>
+        <button v-if="snapshot.permissions.canAdvanceRound" class="primary-button" :disabled="!roomConnectionReady" @click="simpleAction('game:advanceRound')">进入下一轮</button>
       </template>
 
       <template v-else-if="snapshot.phase === 'ENDED' && snapshot.finalResult">
@@ -741,16 +954,14 @@ onBeforeUnmount(() => {
         <div class="word-reveal card-surface"><div><span>平民词</span><strong>{{ snapshot.finalResult.civilianWord }}</strong></div><div><span>卧底词</span><strong>{{ snapshot.finalResult.undercoverWord }}</strong></div></div>
         <div class="final-list card-surface">
           <article v-for="player in snapshot.finalResult.players" :key="player.id">
-            <span class="avatar-small" :class="{ 'undercover-photo': player.role === 'UNDERCOVER' }">
-              <img v-if="player.role === 'UNDERCOVER'" :src="undercoverMarkUrl" alt="" />
-              <User v-else :size="18" weight="fill" />
-            </span>
+            <AvatarBadge :avatar-id="player.avatarId" size="small" />
             <strong>{{ player.nickname }}</strong>
             <span class="role-badge" :class="player.role.toLowerCase()">{{ roleLabels[player.role] }}</span>
             <small>{{ player.hasLeft ? '已退出' : player.isAlive ? '存活' : '已淘汰' }}</small>
           </article>
         </div>
-        <button v-if="snapshot.permissions.canRematch" class="primary-button" :disabled="busy" @click="simpleAction('game:rematch')"><Sparkle :size="20" weight="fill" /> 再来一局</button>
+        <div class="recap-card card-surface"><strong>对局复盘</strong><article v-for="round in snapshot.finalResult.rounds" :key="round.round"><span>第 {{ round.round }} 轮</span><small>{{ round.eliminatedPlayerIds.length ? `淘汰：${round.eliminatedPlayerIds.map(playerName).join('、')}` : '无人淘汰' }}<template v-if="round.selfDestructResults.length"> · 自爆 {{ round.selfDestructResults.length }} 次</template></small></article></div>
+        <button v-if="snapshot.permissions.canRematch" class="primary-button" :disabled="busy || !roomConnectionReady" @click="simpleAction('game:rematch')"><Sparkle :size="20" weight="fill" /> 再来一局</button>
         <p v-else class="action-hint">等待房主发起下一局</p>
         <button class="secondary-button" @click="confirmAction = isHost ? 'dissolve' : 'leave'">退出房间</button>
       </template>
@@ -796,9 +1007,10 @@ onBeforeUnmount(() => {
             <span class="avatar-small"><User :size="18" weight="fill" /></span>
             <span><strong>{{ player.nickname }}</strong><small>{{ player.isOnline ? '在线' : '离线' }} · {{ player.isAlive ? '存活' : '观战' }}</small></span>
             <Crown v-if="player.isHost" class="crown" :size="20" weight="fill" />
-            <button v-else-if="isHost && player.isOnline" class="text-button" @click="transferHost(player.id); roomManagementOpen = false">转移</button>
+            <button v-else-if="isHost && player.isOnline" class="text-button" :disabled="!roomConnectionReady" @click="transferHost(player.id); roomManagementOpen = false">转移</button>
           </article>
         </div>
+        <button class="secondary-button" @click="theme.toggle()"><Sun v-if="theme.effective.value === 'NIGHT'" :size="18" /><Moon v-else :size="18" />切换{{ theme.effective.value === 'NIGHT' ? '日间' : '夜间' }}模式</button>
         <button class="danger-button" @click="confirmAction = isHost ? 'dissolve' : 'leave'; roomManagementOpen = false">{{ isHost ? '解散房间' : '退出房间' }}</button>
         <button class="secondary-button" @click="roomManagementOpen = false">返回游戏</button>
       </section>

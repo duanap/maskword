@@ -1,29 +1,35 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
-  WORD_PAIRS,
+  AVATAR_IDS,
   createRoleDeck,
   createSpeakingOrder,
   determineWinner as determineGameWinner,
+  filterWordPairs,
+  isExplosiveMode,
+  isHiddenMode,
+  normalizeGuess,
   normalizedNicknameKey,
   roleConfigError,
   settleVotes as settleGameVotes,
-  type WordPair,
   type AliveRoleHolder,
+  type AvatarId,
+  type CustomWords,
+  type ErrorCode,
+  type FinalResult,
+  type PrivateIdentity,
+  type RevealedPlayer,
+  type Role,
   type RoleHolder,
-} from "@maskword/shared";
-import type {
-  ErrorCode,
-  FinalResult,
-  PrivateIdentity,
-  RevealedPlayer,
-  Role,
-  RoomConfig,
-  RoomPhase,
-  RoomSnapshot,
-  RoundResult,
-  SessionCredentials,
-  VoteTally,
-  Winner,
+  type RoomConfig,
+  type RoomPhase,
+  type RoomSnapshot,
+  type RoundResult,
+  type SelfDestructResult,
+  type SessionCredentials,
+  type VoteSubmission,
+  type VoteTally,
+  type Winner,
+  type WordPair,
 } from "@maskword/shared";
 import { GAME_CONFIG } from "../config.js";
 
@@ -34,18 +40,30 @@ interface Player {
   resumeToken: string;
   joinedAt: number;
   socketIds: Set<string>;
+  avatarId: AvatarId;
   participates: boolean;
   alive: boolean;
   left: boolean;
   role: Role | null;
   word: string | null;
+  roleRevealed: boolean;
+  selfDestructUsed: boolean;
+}
+
+interface SpeakingState {
+  currentIndex: number;
+  startedAt: number | null;
+  deadlineAt: number | null;
+  completedPlayerIds: Set<string>;
 }
 
 interface GameState {
   round: number;
   wordPair: WordPair;
   speakingOrder: string[];
+  speaking: SpeakingState;
   votes: Map<string, string | null>;
+  sealedGuesses: Map<string, string>;
   votingKind: "NORMAL" | "RUNOFF" | null;
   allowedTargetIds: Set<string>;
   runoffTallies: VoteTally[] | null;
@@ -59,6 +77,7 @@ interface GameState {
 interface Room {
   code: string;
   config: RoomConfig;
+  customWords: CustomWords | null;
   phase: RoomPhase;
   hostId: string;
   players: Map<string, Player>;
@@ -114,15 +133,17 @@ export class RoomService {
     this.callbacks = callbacks;
   }
 
-  createRoom(nickname: string, config: RoomConfig, socketId: string): SessionCredentials {
+  createRoom(nickname: string, config: RoomConfig, socketId: string, customWords?: CustomWords): SessionCredentials {
     const cleanNickname = this.validateNickname(nickname);
     this.validateConfig(config);
+    const privateWords = this.validateCustomWords(config, customWords);
     const roomCode = this.generateRoomCode();
-    const player = this.createPlayer(cleanNickname, config.hostParticipates, socketId);
+    const player = this.createPlayer(cleanNickname, config.hostParticipates, socketId, AVATAR_IDS[0]);
     const now = this.now();
     const room: Room = {
       code: roomCode,
       config: { ...config },
+      customWords: privateWords,
       phase: "WAITING",
       hostId: player.id,
       players: new Map([[player.id, player]]),
@@ -141,22 +162,18 @@ export class RoomService {
 
   joinRoom(nickname: string, rawRoomCode: string, socketId: string): SessionCredentials {
     const cleanNickname = this.validateNickname(nickname);
-    const roomCode = rawRoomCode.trim();
-    const room = this.getRoom(roomCode);
-    if (room.phase !== "WAITING") {
-      throw new GameError("GAME_IN_PROGRESS", "游戏已经开始，当前不能加入");
-    }
-    if (this.activeParticipants(room).length >= this.requiredPlayerCount(room)) {
-      throw new GameError("ROOM_FULL", "房间参赛人数已满");
-    }
-    const normalized = this.normalizeNickname(cleanNickname);
-    if ([...room.players.values()].some((player) => !player.left && player.normalizedNickname === normalized)) {
+    const room = this.getRoom(rawRoomCode.trim());
+    if (room.phase !== "WAITING") throw new GameError("GAME_IN_PROGRESS", "游戏已经开始，当前不能加入");
+    if (this.activeParticipants(room).length >= this.requiredPlayerCount(room)) throw new GameError("ROOM_FULL", "房间参赛人数已满");
+    const normalized = normalizedNicknameKey(cleanNickname);
+    if ([...room.players.values()].some((item) => !item.left && item.normalizedNickname === normalized)) {
       throw new GameError("DUPLICATE_NICKNAME", "房间内已有相同昵称");
     }
 
-    const player = this.createPlayer(cleanNickname, true, socketId);
+    const avatarId = this.firstAvailableAvatar(room);
+    const player = this.createPlayer(cleanNickname, true, socketId, avatarId);
     room.players.set(player.id, player);
-    this.sessions.set(socketId, { roomCode, playerId: player.id });
+    this.sessions.set(socketId, { roomCode: room.code, playerId: player.id });
     this.touchAndPublish(room);
     return this.credentials(room, player);
   }
@@ -167,7 +184,6 @@ export class RoomService {
     if (!player || player.left || player.resumeToken !== credentials.resumeToken) {
       throw new GameError("RECOVERY_FAILED", "恢复信息无效，房间可能已过期");
     }
-
     player.socketIds.add(socketId);
     room.allOfflineSince = null;
     this.sessions.set(socketId, { roomCode: room.code, playerId: player.id });
@@ -187,7 +203,6 @@ export class RoomService {
     const room = this.rooms.get(session.roomCode);
     const player = room?.players.get(session.playerId);
     if (!room || !player) return;
-
     player.socketIds.delete(socketId);
     if (this.onlineMembers(room).length === 0 && room.allOfflineSince === null) room.allOfflineSince = this.now();
     if (room.hostId === player.id && player.socketIds.size === 0) {
@@ -203,44 +218,36 @@ export class RoomService {
       this.dissolveRoom(socketId);
       return;
     }
-
     this.invalidatePlayerSessions(player);
     player.left = true;
     player.alive = false;
     player.socketIds.clear();
-
     if (room.phase === "WAITING") {
       room.players.delete(player.id);
       this.touchAndPublish(room);
       return;
     }
-
+    if (room.game) {
+      room.game.speakingOrder = room.game.speakingOrder.filter((id) => id !== player.id);
+      room.game.speaking.completedPlayerIds.delete(player.id);
+      room.game.sealedGuesses.delete(player.id);
+    }
     const winner = this.determineWinner(room);
     if (winner) {
       this.endGame(room, winner);
       return;
     }
-
     if (room.phase === "VOTING") {
-      room.game?.votes.delete(player.id);
-      for (const [voterId, targetId] of room.game?.votes ?? []) {
-        if (targetId === player.id) room.game?.votes.delete(voterId);
-      }
-      room.game?.allowedTargetIds.delete(player.id);
+      this.invalidateVotesForPlayer(room, player.id);
       if (this.allEligibleVotersSubmitted(room)) this.settleVoting(room);
-    } else if (room.phase === "RUNOFF" && room.game?.allowedTargetIds.has(player.id)) {
-      this.clearVoteState(room);
-      this.showRoundResult(room, {
-        round: room.game.round,
-        eliminatedPlayerId: null,
-        tallies: [],
-        abstainCount: 0,
-        reason: "RUNOFF_CANCELLED",
-      });
-    } else {
-      if (room.game) room.game.speakingOrder = room.game.speakingOrder.filter((id) => id !== player.id);
-      this.touchAndPublish(room);
+      else this.touchAndPublish(room);
+      return;
     }
+    if (room.phase === "RUNOFF" && room.game?.allowedTargetIds.has(player.id)) {
+      this.finalizeVoting(room, [], 0, null, "RUNOFF_CANCELLED");
+      return;
+    }
+    this.touchAndPublish(room);
   }
 
   dissolveRoom(socketId: string): void {
@@ -262,6 +269,17 @@ export class RoomService {
     this.touchAndPublish(room);
   }
 
+  changeAvatar(socketId: string, avatarId: AvatarId): void {
+    const { room, player } = this.requireSession(socketId);
+    if (room.phase !== "WAITING") throw new GameError("INVALID_PHASE", "头像只能在开局前更换");
+    if (!AVATAR_IDS.includes(avatarId)) throw new GameError("INVALID_INPUT", "头像不存在");
+    if ([...room.players.values()].some((item) => !item.left && item.id !== player.id && item.avatarId === avatarId)) {
+      throw new GameError("AVATAR_TAKEN", "这个头像已被其他玩家使用");
+    }
+    player.avatarId = avatarId;
+    this.touchAndPublish(room);
+  }
+
   startGame(socketId: string): void {
     const { room, player } = this.requireSession(socketId);
     this.requireHost(room, player);
@@ -271,22 +289,28 @@ export class RoomService {
     if (participants.length !== this.requiredPlayerCount(room)) {
       throw new GameError("INVALID_CONFIG", `需要 ${this.requiredPlayerCount(room)} 名参赛者，当前为 ${participants.length} 名`);
     }
-
-    const pair = this.pick(WORD_PAIRS);
+    const pool = filterWordPairs(room.config.wordCategory, room.config.wordDifficulty);
+    const pair = room.customWords
+      ? { ...room.customWords, category: room.config.wordCategory, difficulty: room.config.wordDifficulty, audience: "GENERAL" as const }
+      : this.pickWordPair(pool);
     const roles = createRoleDeck(room.config, this.random);
     participants.forEach((participant, index) => {
       const role = roles[index];
       if (!role) throw new GameError("INTERNAL_ERROR", "身份分配失败");
       participant.role = role;
-      participant.word = role === "CIVILIAN" ? pair.civilian : role === "UNDERCOVER" ? pair.undercover : null;
+      participant.word = role === "CIVILIAN" ? pair.civilian : role === "BLANK" ? null : pair.undercover;
       participant.alive = true;
+      participant.roleRevealed = !isHiddenMode(room.config.mode);
+      participant.selfDestructUsed = false;
     });
-
+    const speakingOrder = this.generateSpeakingOrder(participants);
     room.game = {
       round: 1,
       wordPair: pair,
-      speakingOrder: this.generateSpeakingOrder(participants),
+      speakingOrder,
+      speaking: this.newSpeakingState(),
       votes: new Map(),
+      sealedGuesses: new Map(),
       votingKind: null,
       allowedTargetIds: new Set(),
       runoffTallies: null,
@@ -300,47 +324,73 @@ export class RoomService {
     this.touchAndPublish(room);
   }
 
+  startSpeaking(socketId: string): void {
+    const { room, player } = this.requireSession(socketId);
+    const game = room.game;
+    if (!game || room.phase !== "SPEAKING") throw new GameError("INVALID_PHASE", "当前不在发言阶段");
+    const currentId = this.currentSpeakerId(room);
+    if (player.id !== currentId) throw new GameError("UNAUTHORIZED", "只有当前玩家可以开始发言");
+    if (game.speaking.startedAt !== null) throw new GameError("INVALID_PHASE", "发言已经开始");
+    game.speaking.startedAt = this.now();
+    game.speaking.deadlineAt = room.config.speakingSeconds > 0
+      ? game.speaking.startedAt + room.config.speakingSeconds * 1_000
+      : null;
+    this.touchAndPublish(room);
+  }
+
+  endSpeaking(socketId: string): void {
+    const { room, player } = this.requireSession(socketId);
+    const game = room.game;
+    if (!game || room.phase !== "SPEAKING") throw new GameError("INVALID_PHASE", "当前不在发言阶段");
+    const currentId = this.currentSpeakerId(room);
+    if (player.id !== currentId && player.id !== room.hostId) throw new GameError("UNAUTHORIZED", "只有当前玩家或房主可以结束发言");
+    if (currentId) game.speaking.completedPlayerIds.add(currentId);
+    game.speaking.currentIndex += 1;
+    game.speaking.startedAt = null;
+    game.speaking.deadlineAt = null;
+    this.skipUnavailableSpeakers(room);
+    this.touchAndPublish(room);
+  }
+
   beginVote(socketId: string): void {
     const { room, player } = this.requireSession(socketId);
     this.requireHost(room, player);
-    if (room.phase !== "SPEAKING" || !room.game) {
-      throw new GameError("INVALID_PHASE", "当前不能进入投票");
-    }
+    if (room.phase !== "SPEAKING" || !room.game) throw new GameError("INVALID_PHASE", "当前不能进入投票");
     const alive = this.alivePlayers(room);
     room.phase = "VOTING";
     room.game.votes.clear();
+    room.game.sealedGuesses.clear();
     room.game.votingKind = "NORMAL";
     room.game.allowedTargetIds = new Set(alive.map((candidate) => candidate.id));
     room.game.runoffTallies = null;
     room.game.deadlineAt = this.now() + GAME_CONFIG.normalVoteDurationMs;
+    this.revealEligibleHiddenRoles(room);
     this.scheduleVoteTimeout(room);
     this.touchAndPublish(room);
   }
 
-  submitVote(socketId: string, targetPlayerId: string | null): void {
+  submitVote(socketId: string, submission: VoteSubmission): void {
     const { room, player } = this.requireSession(socketId);
     const game = room.game;
-    if (!game || (room.phase !== "VOTING" && room.phase !== "RUNOFF")) {
-      throw new GameError("INVALID_PHASE", "当前不在投票阶段");
-    }
-    if (!player.participates || !player.alive || player.left) {
-      throw new GameError("INVALID_VOTE", "你当前没有投票资格");
-    }
+    if (!game || (room.phase !== "VOTING" && room.phase !== "RUNOFF")) throw new GameError("INVALID_PHASE", "当前不在投票阶段");
+    if (!player.participates || !player.alive || player.left) throw new GameError("INVALID_VOTE", "你当前没有投票资格");
     if (game.votes.has(player.id)) throw new GameError("ALREADY_VOTED", "本轮已经提交过投票");
-    if (targetPlayerId === null) {
-      if (this.alivePlayers(room).length < 4) throw new GameError("INVALID_VOTE", "仅剩三人时不能弃权");
-    } else {
-      if (targetPlayerId === player.id || !game.allowedTargetIds.has(targetPlayerId)) {
-        throw new GameError("INVALID_VOTE", "请选择有效的其他存活玩家");
-      }
+    this.validateVoteTarget(room, player, submission.targetPlayerId);
+    const guess = submission.guess?.trim();
+    if (game.votingKind === "RUNOFF" && guess) throw new GameError("SELF_DESTRUCT_UNAVAILABLE", "平票重投不能新增或修改自爆猜词");
+    if (guess) {
+      if (player.selfDestructUsed) throw new GameError("SELF_DESTRUCT_USED", "你的自爆猜词机会已使用");
+      if (!this.canSelfDestruct(room, player)) throw new GameError("SELF_DESTRUCT_UNAVAILABLE", "当前不具备自爆猜词资格");
+      if ([...guess].length > 12) throw new GameError("INVALID_INPUT", "猜测词语长度需要为 1–12 个字符");
     }
-
-    game.votes.set(player.id, targetPlayerId);
-    if (this.allEligibleVotersSubmitted(room)) {
-      this.settleVoting(room);
-    } else {
-      this.touchAndPublish(room);
+    // 选票和猜词通过同一个事件在所有校验通过后一次写入。
+    game.votes.set(player.id, submission.targetPlayerId);
+    if (guess) {
+      game.sealedGuesses.set(player.id, guess);
+      player.selfDestructUsed = true;
     }
+    if (this.allEligibleVotersSubmitted(room)) this.settleVoting(room);
+    else this.touchAndPublish(room);
   }
 
   finishRunoff(socketId: string): void {
@@ -348,6 +398,15 @@ export class RoomService {
     this.requireHost(room, player);
     if (room.phase !== "RUNOFF") throw new GameError("INVALID_PHASE", "当前没有平票重投");
     this.settleVoting(room);
+  }
+
+  advanceRound(socketId: string): void {
+    const { room, player } = this.requireSession(socketId);
+    this.requireHost(room, player);
+    if (room.phase !== "ROUND_RESULT" || room.config.resultAdvance !== "MANUAL") {
+      throw new GameError("INVALID_PHASE", "当前不能手动进入下一轮");
+    }
+    this.goToNextRound(room.code);
   }
 
   rematch(socketId: string): void {
@@ -362,6 +421,8 @@ export class RoomService {
       member.alive = member.participates;
       member.role = null;
       member.word = null;
+      member.roleRevealed = false;
+      member.selfDestructUsed = false;
     }
     room.game = null;
     room.phase = "WAITING";
@@ -376,12 +437,9 @@ export class RoomService {
   snapshotsForRoom(roomCode: string): Array<{ socketId: string; snapshot: RoomSnapshot }> {
     const room = this.rooms.get(roomCode);
     if (!room) return [];
-    const snapshots: Array<{ socketId: string; snapshot: RoomSnapshot }> = [];
-    for (const player of room.players.values()) {
-      if (player.left) continue;
-      for (const socketId of player.socketIds) snapshots.push({ socketId, snapshot: this.snapshot(room, player) });
-    }
-    return snapshots;
+    return [...room.players.values()].flatMap((player) =>
+      player.left ? [] : [...player.socketIds].map((socketId) => ({ socketId, snapshot: this.snapshot(room, player) })),
+    );
   }
 
   cleanupExpiredRooms(): void {
@@ -405,70 +463,101 @@ export class RoomService {
 
   private settleVoting(room: Room): void {
     const game = room.game;
-    if (!game || !game.votingKind) throw new GameError("INVALID_PHASE", "当前没有可结算的投票");
+    if (!game?.votingKind) throw new GameError("INVALID_PHASE", "当前没有可结算的投票");
     this.clearRoomTimer(this.voteTimers, room.code);
-
-    const voteRecord = Object.fromEntries(game.votes);
-    const { tallies, abstainCount, leaderIds: leaders } = settleGameVotes(
+    const { tallies, abstainCount, leaderIds } = settleGameVotes(
       [...game.allowedTargetIds],
-      this.eligibleVoters(room).map((player) => player.id),
-      voteRecord,
+      this.eligibleVoters(room).map((item) => item.id),
+      Object.fromEntries(game.votes),
     );
-
-    if (game.votingKind === "NORMAL" && leaders.length > 1) {
+    if (game.votingKind === "NORMAL" && leaderIds.length > 1) {
       room.phase = "RUNOFF";
       game.votes.clear();
       game.votingKind = "RUNOFF";
-      game.allowedTargetIds = new Set(leaders);
-      game.runoffTallies = tallies.filter((item) => leaders.includes(item.playerId));
+      game.allowedTargetIds = new Set(leaderIds);
+      game.runoffTallies = tallies.filter((item) => leaderIds.includes(item.playerId));
       game.deadlineAt = null;
       this.touchAndPublish(room);
       return;
     }
-
-    let eliminatedPlayerId: string | null = null;
-    let reason: RoundResult["reason"] = "NO_VALID_VOTE";
-    if (leaders.length === 1) {
-      eliminatedPlayerId = leaders[0] ?? null;
-      const eliminated = eliminatedPlayerId ? room.players.get(eliminatedPlayerId) : undefined;
-      if (eliminated) eliminated.alive = false;
-      reason = "ELIMINATED";
-    } else if (leaders.length > 1) {
-      reason = "TIE";
-    }
-
-    this.clearVoteState(room);
-    const result: RoundResult = { round: game.round, eliminatedPlayerId, tallies, abstainCount, reason };
-    const winner = this.determineWinner(room);
-    if (winner) {
-      game.roundResults.push(result);
-      game.currentRoundResult = result;
-      this.endGame(room, winner);
-    } else {
-      this.showRoundResult(room, result);
-    }
+    const voteEliminatedPlayerId = leaderIds.length === 1 ? leaderIds[0] ?? null : null;
+    const reason: RoundResult["reason"] = leaderIds.length === 1 ? "ELIMINATED" : leaderIds.length > 1 ? "TIE" : "NO_VALID_VOTE";
+    this.finalizeVoting(room, tallies, abstainCount, voteEliminatedPlayerId, reason);
   }
 
-  private showRoundResult(room: Room, result: RoundResult): void {
+  private finalizeVoting(
+    room: Room,
+    tallies: VoteTally[],
+    abstainCount: number,
+    voteEliminatedPlayerId: string | null,
+    fallbackReason: RoundResult["reason"],
+  ): void {
+    const game = room.game;
+    if (!game) return;
+    const selfDestructResults: SelfDestructResult[] = [...game.sealedGuesses].flatMap(([playerId, guess]) => {
+      const player = room.players.get(playerId);
+      if (!player || (player.role !== "UNDERCOVER" && player.role !== "DOUBLE_AGENT")) return [];
+      return [{ playerId, role: player.role, guess, correct: normalizeGuess(guess) === normalizeGuess(game.wordPair.civilian) }];
+    });
+    const anyCorrect = selfDestructResults.some((item) => item.correct);
+    const eliminatedIds = new Set<string>();
+    if (!anyCorrect) {
+      for (const result of selfDestructResults) if (!result.correct) eliminatedIds.add(result.playerId);
+      if (voteEliminatedPlayerId) eliminatedIds.add(voteEliminatedPlayerId);
+      for (const playerId of eliminatedIds) {
+        const player = room.players.get(playerId);
+        if (player) player.alive = false;
+      }
+    }
+    const result: RoundResult = {
+      round: game.round,
+      eliminatedPlayerIds: [...eliminatedIds],
+      voteEliminatedPlayerId: anyCorrect ? null : voteEliminatedPlayerId,
+      selfDestructResults,
+      tallies,
+      abstainCount,
+      reason: eliminatedIds.size > 1 ? "MULTIPLE_ELIMINATED" : eliminatedIds.size === 1 ? "ELIMINATED" : fallbackReason,
+    };
+    this.clearVoteState(room);
+    game.sealedGuesses.clear();
+    game.roundResults.push(result);
+    game.currentRoundResult = result;
+    if (anyCorrect) {
+      this.endGame(room, "UNDERCOVER");
+      return;
+    }
+    this.revealActivatedDoubleAgents(room);
+    const winner = this.determineWinner(room);
+    if (winner) {
+      this.endGame(room, winner);
+      return;
+    }
+    this.showRoundResult(room);
+  }
+
+  private showRoundResult(room: Room): void {
     if (!room.game) return;
-    room.game.roundResults.push(result);
-    room.game.currentRoundResult = result;
-    room.game.roundResultEndsAt = this.now() + GAME_CONFIG.roundResultDurationMs;
     room.phase = "ROUND_RESULT";
     this.clearRoomTimer(this.resultTimers, room.code);
-    const timer = this.setTimer(() => this.advanceRound(room.code), GAME_CONFIG.roundResultDurationMs);
-    this.resultTimers.set(room.code, timer);
+    if (room.config.resultAdvance === "AUTO") {
+      room.game.roundResultEndsAt = this.now() + GAME_CONFIG.roundResultDurationMs;
+      const timer = this.setTimer(() => this.goToNextRound(room.code), GAME_CONFIG.roundResultDurationMs);
+      this.resultTimers.set(room.code, timer);
+    } else {
+      room.game.roundResultEndsAt = null;
+    }
     this.touchAndPublish(room);
   }
 
-  private advanceRound(roomCode: string): void {
-    this.resultTimers.delete(roomCode);
+  private goToNextRound(roomCode: string): void {
+    this.clearRoomTimer(this.resultTimers, roomCode);
     const room = this.rooms.get(roomCode);
     if (!room?.game || room.phase !== "ROUND_RESULT") return;
     room.game.round += 1;
     room.game.currentRoundResult = null;
     room.game.roundResultEndsAt = null;
     room.game.speakingOrder = this.generateSpeakingOrder(this.alivePlayers(room));
+    room.game.speaking = this.newSpeakingState();
     room.phase = "SPEAKING";
     this.touchAndPublish(room);
   }
@@ -489,8 +578,8 @@ export class RoomService {
     if (!room.game) return null;
     return determineGameWinner(
       this.activeParticipants(room)
-        .filter((player): player is Player & { role: Role } => player.role !== null)
-        .map((player): AliveRoleHolder => ({ id: player.id, role: player.role, alive: player.alive, left: player.left })),
+        .filter((item): item is Player & { role: Role } => item.role !== null)
+        .map((item): AliveRoleHolder => ({ id: item.id, role: item.role, alive: item.alive, left: item.left })),
     );
   }
 
@@ -499,14 +588,22 @@ export class RoomService {
     const eligibleVoters = this.eligibleVoters(room);
     const isHost = room.hostId === self.id;
     const canVote = Boolean(
-      game &&
-        (room.phase === "VOTING" || room.phase === "RUNOFF") &&
-        self.participates &&
-        self.alive &&
-        !self.left &&
-        !game.votes.has(self.id),
+      game && (room.phase === "VOTING" || room.phase === "RUNOFF") && self.participates && self.alive && !self.left && !game.votes.has(self.id),
     );
-    const privateIdentity: PrivateIdentity | null = self.role ? { role: self.role, word: self.word } : null;
+    const identityAvailable = Boolean(self.role && game);
+    const privateIdentity: PrivateIdentity | null = identityAvailable
+      ? {
+          role: self.roleRevealed ? self.role : null,
+          word: self.word,
+          roleRevealed: self.roleRevealed,
+          selfDestruct: {
+            eligible: this.canSelfDestruct(room, self),
+            used: self.selfDestructUsed,
+            sealed: Boolean(game?.sealedGuesses.has(self.id)),
+          },
+        }
+      : null;
+    const currentSpeakerId = this.currentSpeakerId(room);
     return {
       roomCode: room.code,
       phase: room.phase,
@@ -517,45 +614,56 @@ export class RoomService {
       requiredPlayerCount: this.requiredPlayerCount(room),
       participatingPlayerCount: this.activeParticipants(room).length,
       players: [...room.players.values()]
-        .filter((player) => !player.left)
+        .filter((item) => !item.left)
         .sort((left, right) => left.joinedAt - right.joinedAt)
-        .map((player) => ({
-          id: player.id,
-          nickname: player.nickname,
-          isHost: player.id === room.hostId,
-          isOnline: player.socketIds.size > 0,
-          isParticipating: player.participates,
-          isAlive: player.alive,
-          hasSubmittedVote: player.id === self.id ? Boolean(game?.votes.has(player.id)) : false,
+        .map((item) => ({
+          id: item.id,
+          nickname: item.nickname,
+          avatarId: item.avatarId,
+          isHost: item.id === room.hostId,
+          isOnline: item.socketIds.size > 0,
+          isParticipating: item.participates,
+          isAlive: item.alive,
+          hasSubmittedVote: item.id === self.id ? Boolean(game?.votes.has(item.id)) : false,
         })),
       speakingOrder: game?.speakingOrder ?? [],
+      speaking: game
+        ? {
+            currentPlayerId: currentSpeakerId,
+            startedAt: game.speaking.startedAt,
+            deadlineAt: game.speaking.deadlineAt,
+            completedPlayerIds: [...game.speaking.completedPlayerIds],
+          }
+        : null,
       privateIdentity,
-      voting:
-        game && game.votingKind
-          ? {
-              kind: game.votingKind,
-              submittedCount: game.votes.size,
-              eligibleCount: eligibleVoters.length,
-              candidateIds: [...game.allowedTargetIds],
-              allowedTargetIds: canVote
-                ? [...game.allowedTargetIds].filter((playerId) => playerId !== self.id)
-                : [],
-              runoffTallies: game.votingKind === "RUNOFF" ? game.runoffTallies : null,
-              canVote,
-              canAbstain: canVote && this.alivePlayers(room).length >= 4,
-              deadlineAt: game.deadlineAt,
-            }
-          : null,
+      voting: game?.votingKind
+        ? {
+            kind: game.votingKind,
+            submittedCount: game.votes.size,
+            eligibleCount: eligibleVoters.length,
+            candidateIds: [...game.allowedTargetIds],
+            allowedTargetIds: canVote ? [...game.allowedTargetIds].filter((id) => id !== self.id) : [],
+            runoffTallies: game.votingKind === "RUNOFF" ? game.runoffTallies : null,
+            canVote,
+            canAbstain: canVote && this.alivePlayers(room).length >= 4,
+            canGuess: canVote && this.canSelfDestruct(room, self),
+            deadlineAt: game.deadlineAt,
+          }
+        : null,
       roundResult: game?.currentRoundResult ?? null,
       roundResultEndsAt: room.phase === "ROUND_RESULT" ? game?.roundResultEndsAt ?? null : null,
       finalResult: room.phase === "ENDED" ? this.finalResult(room) : null,
       permissions: {
         canStart: isHost && room.phase === "WAITING" && this.activeParticipants(room).length === this.requiredPlayerCount(room),
         canBeginVote: isHost && room.phase === "SPEAKING",
+        canStartSpeaking: room.phase === "SPEAKING" && self.id === currentSpeakerId && game?.speaking.startedAt === null,
+        canEndSpeaking: room.phase === "SPEAKING" && Boolean(currentSpeakerId) && (self.id === currentSpeakerId || isHost),
+        canAdvanceRound: isHost && room.phase === "ROUND_RESULT" && room.config.resultAdvance === "MANUAL",
         canFinishRunoff: isHost && room.phase === "RUNOFF",
-        canTransferHost: isHost && this.onlineMembers(room).some((player) => player.id !== self.id),
+        canTransferHost: isHost && this.onlineMembers(room).some((item) => item.id !== self.id),
         canRematch: isHost && room.phase === "ENDED",
         canDissolve: isHost,
+        canChangeAvatar: room.phase === "WAITING",
       },
     };
   }
@@ -564,14 +672,15 @@ export class RoomService {
     const game = room.game;
     if (!game?.winner) return null;
     const players: RevealedPlayer[] = [...room.players.values()]
-      .filter((player) => player.role !== null)
+      .filter((item) => item.role !== null)
       .sort((left, right) => left.joinedAt - right.joinedAt)
-      .map((player) => ({
-        id: player.id,
-        nickname: player.nickname,
-        role: player.role as Role,
-        isAlive: player.alive,
-        hasLeft: player.left,
+      .map((item) => ({
+        id: item.id,
+        nickname: item.nickname,
+        avatarId: item.avatarId,
+        role: item.role as Role,
+        isAlive: item.alive,
+        hasLeft: item.left,
       }));
     return {
       winner: game.winner,
@@ -580,6 +689,95 @@ export class RoomService {
       players,
       rounds: game.roundResults,
     };
+  }
+
+  private canSelfDestruct(room: Room, player: Player): boolean {
+    const game = room.game;
+    if (!game || room.phase !== "VOTING" || game.votingKind !== "NORMAL" || !isExplosiveMode(room.config.mode)) return false;
+    if (!player.alive || player.left || player.selfDestructUsed || game.round < room.config.selfDestructRound) return false;
+    if (player.role === "UNDERCOVER") return true;
+    return player.role === "DOUBLE_AGENT" && !this.hasAliveOrdinaryUndercover(room);
+  }
+
+  private revealEligibleHiddenRoles(room: Room): void {
+    if (!isHiddenMode(room.config.mode) || !isExplosiveMode(room.config.mode) || !room.game) return;
+    if (room.game.round >= room.config.selfDestructRound) {
+      for (const player of this.alivePlayers(room)) if (player.role === "UNDERCOVER") player.roleRevealed = true;
+    }
+    this.revealActivatedDoubleAgents(room);
+  }
+
+  private revealActivatedDoubleAgents(room: Room): void {
+    if (!isHiddenMode(room.config.mode) || this.hasAliveOrdinaryUndercover(room)) return;
+    for (const player of this.alivePlayers(room)) if (player.role === "DOUBLE_AGENT") player.roleRevealed = true;
+  }
+
+  private hasAliveOrdinaryUndercover(room: Room): boolean {
+    return this.alivePlayers(room).some((item) => item.role === "UNDERCOVER");
+  }
+
+  private validateVoteTarget(room: Room, player: Player, targetId: string | null): void {
+    const game = room.game;
+    if (!game) throw new GameError("INVALID_PHASE", "当前不在投票阶段");
+    if (targetId === null) {
+      if (this.alivePlayers(room).length < 4) throw new GameError("INVALID_VOTE", "仅剩三人时不能弃权");
+      return;
+    }
+    if (targetId === player.id || !game.allowedTargetIds.has(targetId)) {
+      throw new GameError("INVALID_VOTE", "请选择有效的其他存活玩家");
+    }
+  }
+
+  private validateCustomWords(config: RoomConfig, words?: CustomWords): CustomWords | null {
+    if (!words) return null;
+    if (config.hostParticipates) throw new GameError("INVALID_CONFIG", "只有不参赛的主持人可以自定义词语");
+    const civilian = words.civilian.trim();
+    const undercover = words.undercover.trim();
+    if (![civilian, undercover].every((word) => [...word].length >= 1 && [...word].length <= 12)) {
+      throw new GameError("INVALID_CONFIG", "自定义词语长度需要为 1–12 个字符");
+    }
+    if (normalizeGuess(civilian) === normalizeGuess(undercover)) throw new GameError("INVALID_CONFIG", "平民词和卧底词不能相同");
+    return { civilian, undercover };
+  }
+
+  private validateConfig(config: RoomConfig): void {
+    const error = roleConfigError(config);
+    if (error) throw new GameError("INVALID_CONFIG", error);
+    if (!filterWordPairs(config.wordCategory, config.wordDifficulty).length) throw new GameError("WORD_POOL_EMPTY", "当前词库筛选结果为空");
+  }
+
+  private pickWordPair(items: readonly WordPair[]): WordPair {
+    const item = items[Math.floor(this.random() * items.length)];
+    if (!item) throw new GameError("WORD_POOL_EMPTY", "当前词库筛选结果为空");
+    return item;
+  }
+
+  private currentSpeakerId(room: Room): string | null {
+    if (!room.game || room.phase !== "SPEAKING") return null;
+    this.skipUnavailableSpeakers(room);
+    return room.game.speakingOrder[room.game.speaking.currentIndex] ?? null;
+  }
+
+  private skipUnavailableSpeakers(room: Room): void {
+    const game = room.game;
+    if (!game) return;
+    while (game.speaking.currentIndex < game.speakingOrder.length) {
+      const player = room.players.get(game.speakingOrder[game.speaking.currentIndex] ?? "");
+      if (player?.alive && !player.left) break;
+      game.speaking.currentIndex += 1;
+    }
+  }
+
+  private newSpeakingState(): SpeakingState {
+    return { currentIndex: 0, startedAt: null, deadlineAt: null, completedPlayerIds: new Set() };
+  }
+
+  private invalidateVotesForPlayer(room: Room, playerId: string): void {
+    const game = room.game;
+    if (!game) return;
+    game.votes.delete(playerId);
+    for (const [voterId, targetId] of game.votes) if (targetId === playerId) game.votes.delete(voterId);
+    game.allowedTargetIds.delete(playerId);
   }
 
   private scheduleVoteTimeout(room: Room): void {
@@ -607,7 +805,7 @@ export class RoomService {
     if (!host || host.socketIds.size > 0 || room.hostDisconnectedAt === null) return;
     if (this.now() - room.hostDisconnectedAt < GAME_CONFIG.hostTransferDelayMs) return;
     const successor = this.onlineMembers(room)
-      .filter((player) => player.id !== host.id)
+      .filter((item) => item.id !== host.id)
       .sort((left, right) => left.joinedAt - right.joinedAt)[0];
     if (!successor) return;
     room.hostId = successor.id;
@@ -616,7 +814,7 @@ export class RoomService {
   }
 
   private closeRoom(room: Room, reason: "DISSOLVED" | "EXPIRED"): void {
-    const socketIds = [...room.players.values()].flatMap((player) => [...player.socketIds]);
+    const socketIds = [...room.players.values()].flatMap((item) => [...item.socketIds]);
     for (const player of room.players.values()) this.invalidatePlayerSessions(player);
     this.clearRoomTimer(this.voteTimers, room.code);
     this.clearRoomTimer(this.resultTimers, room.code);
@@ -636,7 +834,7 @@ export class RoomService {
 
   private allEligibleVotersSubmitted(room: Room): boolean {
     const votes = room.game?.votes;
-    return Boolean(votes && this.eligibleVoters(room).every((player) => votes.has(player.id)));
+    return Boolean(votes && this.eligibleVoters(room).every((item) => votes.has(item.id)));
   }
 
   private eligibleVoters(room: Room): Player[] {
@@ -644,43 +842,54 @@ export class RoomService {
   }
 
   private alivePlayers(room: Room): Player[] {
-    return [...room.players.values()].filter((player) => player.participates && player.alive && !player.left);
+    return [...room.players.values()].filter((item) => item.participates && item.alive && !item.left);
   }
 
   private activeParticipants(room: Room): Player[] {
-    return [...room.players.values()].filter((player) => player.participates && !player.left);
+    return [...room.players.values()].filter((item) => item.participates && !item.left);
   }
 
   private onlineMembers(room: Room): Player[] {
-    return [...room.players.values()].filter((player) => !player.left && player.socketIds.size > 0);
+    return [...room.players.values()].filter((item) => !item.left && item.socketIds.size > 0);
   }
 
   private requiredPlayerCount(room: Room): number {
-    return room.config.civilianCount + room.config.undercoverCount + room.config.blankCount;
+    const config = room.config;
+    return config.civilianCount + config.undercoverCount + config.blankCount + config.doubleAgentCount;
   }
 
   private generateSpeakingOrder(players: Player[]): string[] {
     return createSpeakingOrder(
       players
-        .filter((player): player is Player & { role: Role } => player.role !== null)
-        .map((player): RoleHolder => ({ id: player.id, role: player.role })),
+        .filter((item): item is Player & { role: Role } => item.role !== null)
+        .map((item): RoleHolder => ({ id: item.id, role: item.role })),
       this.random,
     );
   }
 
-  private createPlayer(nickname: string, participates: boolean, socketId: string): Player {
+  private firstAvailableAvatar(room: Room): AvatarId {
+    const occupied = new Set([...room.players.values()].filter((item) => !item.left).map((item) => item.avatarId));
+    const avatar = AVATAR_IDS.find((item) => !occupied.has(item));
+    if (!avatar) throw new GameError("ROOM_FULL", "房间可用头像已用完");
+    return avatar;
+  }
+
+  private createPlayer(nickname: string, participates: boolean, socketId: string, avatarId: AvatarId): Player {
     return {
       id: randomUUID(),
       nickname,
-      normalizedNickname: this.normalizeNickname(nickname),
+      normalizedNickname: normalizedNicknameKey(nickname),
       resumeToken: randomBytes(32).toString("base64url"),
       joinedAt: this.now(),
       socketIds: new Set([socketId]),
+      avatarId,
       participates,
       alive: participates,
       left: false,
       role: null,
       word: null,
+      roleRevealed: false,
+      selfDestructUsed: false,
     };
   }
 
@@ -694,15 +903,6 @@ export class RoomService {
       throw new GameError("INVALID_INPUT", `昵称长度需要为 1–${GAME_CONFIG.nicknameMaxLength} 个字符`);
     }
     return clean;
-  }
-
-  private normalizeNickname(value: string): string {
-    return normalizedNicknameKey(value);
-  }
-
-  private validateConfig(config: RoomConfig): void {
-    const error = roleConfigError(config);
-    if (error) throw new GameError("INVALID_CONFIG", error);
   }
 
   private getRoom(roomCode: string, missingCode: ErrorCode = "ROOM_NOT_FOUND"): Room {
@@ -732,21 +932,11 @@ export class RoomService {
     throw new GameError("INTERNAL_ERROR", "暂时无法生成房间号，请稍后重试");
   }
 
-  private pick<T>(items: readonly T[]): T {
-    const item = items[Math.floor(this.random() * items.length)];
-    if (item === undefined) throw new GameError("INTERNAL_ERROR", "随机选择失败");
-    return item;
-  }
-
-
   private invalidatePlayerSessions(player: Player): void {
     for (const socketId of player.socketIds) this.sessions.delete(socketId);
   }
 
-  private clearRoomTimer(
-    timers: Map<string, ReturnType<typeof setTimeout>>,
-    roomCode: string,
-  ): void {
+  private clearRoomTimer(timers: Map<string, ReturnType<typeof setTimeout>>, roomCode: string): void {
     const timer = timers.get(roomCode);
     if (timer) this.clearTimer(timer);
     timers.delete(roomCode);
