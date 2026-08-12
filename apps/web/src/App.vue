@@ -19,7 +19,6 @@ import {
   PhSparkle as Sparkle,
   PhSpinnerGap as SpinnerGap,
   PhUser as User,
-  PhUsersThree as UsersThree,
   PhWarningCircle as WarningCircle,
   PhWifiHigh as WifiHigh,
   PhWifiSlash as WifiSlash,
@@ -498,7 +497,6 @@ onBeforeUnmount(() => {
             <small>一台手机轮流查看身份</small>
             <em>本机开始 <ArrowRight :size="17" weight="bold" /></em>
           </span>
-          <span class="mode-card-symbol"><UsersThree :size="28" weight="fill" /></span>
         </button>
       </template>
 
@@ -537,12 +535,12 @@ onBeforeUnmount(() => {
         </div>
         <div class="config-summary participant-summary">
           <span>本局参赛人数</span>
-          <strong>{{ participantCount }}</strong>
-          <small>支持 3–12 人</small>
           <div class="participant-stepper" aria-label="调整参赛人数">
             <button aria-label="参赛人数减一" :disabled="participantCount <= 3" @click="adjustParticipantCount(-1)">−</button>
+            <strong>{{ participantCount }}</strong>
             <button aria-label="参赛人数加一" :disabled="participantCount >= 12" @click="adjustParticipantCount(1)">＋</button>
           </div>
+          <small>支持 3–12 人</small>
         </div>
         <p class="attendance-summary">{{ attendanceSummary }}</p>
         <button class="config-disclosure" :aria-expanded="advancedConfigOpen" @click="advancedConfigOpen = !advancedConfigOpen">

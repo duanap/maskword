@@ -63,8 +63,8 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(101, 70, 234
 .mode-card-muted::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(20, 12, 39, .94) 0%, rgba(31, 18, 54, .78) 45%, rgba(31, 18, 54, .12) 100%); }
 .mode-card-muted .mode-copy { max-width: 74%; }
 .mode-card-muted .mode-copy em { margin-top: 8px; padding: 8px 12px; background: rgba(255,255,255,.94); color: var(--violet-dark); font-size: 12px; }
+.offline-mode-card { min-height: 220px; }
 .offline-mode-card .mode-card-art { object-position: 61% center; }
-.mode-card-symbol { position: relative; z-index: 3; flex: 0 0 auto; width: 52px; height: 52px; border: 1px solid rgba(255,255,255,.3); border-radius: 17px; display: grid; place-items: center; background: rgba(255,255,255,.14); color: #fff; box-shadow: inset 0 1px rgba(255,255,255,.28), 0 10px 24px rgba(14, 8, 29, .22); backdrop-filter: blur(8px); }
 .mode-card:active { transform: translateY(1px) scale(.99); }
 
 @media (hover: hover) and (pointer: fine) {
@@ -123,8 +123,9 @@ button:disabled { cursor: not-allowed; opacity: 0.48; box-shadow: none; }
 .config-summary { text-align: center; padding: 12px 0 4px; }
 .config-summary span, .config-summary small { display: block; color: var(--muted); font-size: 13px; }
 .config-summary strong { display: block; margin: 4px 0; color: var(--violet); font-size: 46px; line-height: 1; }
-.participant-summary { position: relative; padding-inline: 72px; }
-.participant-stepper { position: absolute; top: 18px; right: 0; display: flex; gap: 7px; }
+.participant-summary { padding-inline: 0; }
+.participant-stepper { display: grid; grid-template-columns: 44px minmax(64px, auto) 44px; align-items: center; justify-content: center; gap: 14px; margin: 4px 0; }
+.participant-stepper strong { margin: 0; }
 .participant-stepper button { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--violet-soft); color: var(--violet); font-size: 22px; cursor: pointer; }
 .attendance-summary { margin: -7px 0 0; color: var(--muted); text-align: center; font-size: 12px; }
 .config-disclosure { min-height: 64px; padding: 11px 15px; border: 1px solid var(--line); border-radius: 15px; background: #fff; color: var(--ink); display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; cursor: pointer; }

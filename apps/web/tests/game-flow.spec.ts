@@ -14,6 +14,16 @@ async function joinRoom(page: Page, nickname: string, roomCode: string) {
   await expect(page.locator(".room-code-card strong")).toHaveText(roomCode);
 }
 
+test("mode cards share the same size and the offline card has no separate symbol", async ({ page }) => {
+  await page.goto("/");
+
+  const onlineCard = await page.locator(".mode-card-primary").boundingBox();
+  const offlineCard = await page.locator(".offline-mode-card").boundingBox();
+  expect(onlineCard?.width).toBe(offlineCard?.width);
+  expect(onlineCard?.height).toBe(offlineCard?.height);
+  await expect(page.locator(".offline-mode-card .mode-card-symbol")).toHaveCount(0);
+});
+
 test("offline same-device mode stays local, resumes safely, and completes a three-player game", async ({ page }) => {
   const socketRequests: string[] = [];
   page.on("request", (request) => {
@@ -127,6 +137,11 @@ test("online setup uses fixed participant presets and accessible controls", asyn
   const hitbox = await page.getByRole("button", { name: "参赛人数加一" }).boundingBox();
   expect(hitbox?.width).toBeGreaterThanOrEqual(44);
   expect(hitbox?.height).toBeGreaterThanOrEqual(44);
+
+  const decrease = await page.getByRole("button", { name: "参赛人数减一" }).boundingBox();
+  const participantNumber = await page.locator(".participant-stepper strong").boundingBox();
+  expect(decrease?.x).toBeLessThan(participantNumber?.x ?? 0);
+  expect(hitbox?.x).toBeGreaterThan(participantNumber?.x ?? 0);
 });
 
 test("room invitation falls back to copying only the six-digit code", async ({ page }) => {
